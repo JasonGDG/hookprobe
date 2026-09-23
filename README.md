@@ -28,7 +28,7 @@ $ hookprobe --no-home
 Hook                       source   starts  answers  can block
 --------------------------------------------------------------
 PreToolUse · guard.sh      project  yes     yes      yes
-PreToolUse · deny-rm.py    project  yes     no       untested
+PreToolUse · deny-rm.py    project  no      no       no
 SessionStart · context.py  project  yes     yes      n/a
 
 2 of 3 hooks are not protecting anything.
@@ -55,7 +55,7 @@ this channel (guarded run exit 0).
 Hook                       source   starts  answers  can block  effective
 -------------------------------------------------------------------------
 PreToolUse · guard.sh      project  yes     yes      yes        yes
-PreToolUse · deny-rm.py    project  yes     no       untested   n/a
+PreToolUse · deny-rm.py    project  no      no       no         n/a
 SessionStart · context.py  project  yes     yes      n/a        n/a
 
 Channel check: a deny verdict does take effect here -- measured against two
@@ -88,12 +88,15 @@ Python 3.11+, standard library only. No dependencies.
 | **Output shape** | a greeting from your shell profile in front of the JSON breaks parsing | no |
 | **Output cap** | above 10,000 characters the value is written to a file Claude is not asked to read | no |
 | **Timeout** | a hook waiting on stdin runs into its timeout — and a timed-out `PreToolUse` hook does **not** block | no |
-| **Placement** | hooks in agent frontmatter, `once: true` in skills, the Desktop tab | partly |
+| **Placement** | hooks in agent frontmatter, `once: true` in skills, plugin sources | partly |
 | **Effectiveness** | the hook fires, but its verdict does not change the call | **yes** (`--live`) |
-| **Channel** | headless behaves differently from interactive | **yes** (`--live`) |
+| **Channel** | whether a deny verdict is honoured in headless mode at all | **yes** (`--live`) |
 
-The default run is offline: no network, no API key, no tokens. Only `--live` spends two real
-sessions, and it asks before it does.
+The default run needs no network, no API key and no tokens **of its own** — but be clear about
+what it does: it **executes every configured hook**, twice, with a payload on stdin. Those are
+your programs, and they run with your environment in your project directory, exactly as Claude
+Code would run them. If a hook writes files or calls out to the network, it will do that here
+too. Only `--live` spends two real sessions, and it asks first when run from a terminal.
 
 ## How `--live` works
 
@@ -150,6 +153,13 @@ The gap this fills is stated by an open issue in the tracker itself:
 
 > "Configured and effective are different properties, and only the first is observable today."
 > — [anthropics/claude-code#82323]
+
+## Known limits of this version
+
+`--live` measures one channel (`claude -p`), not the difference between headless and
+interactive, and it attributes the channel verdict to handlers it did not individually test.
+A hook wrapped in a shell construct that swallows its own error (`cmd 2>/dev/null || exit 0`)
+cannot be verified from outside — hookprobe says so instead of reporting a pass.
 
 ## Development
 

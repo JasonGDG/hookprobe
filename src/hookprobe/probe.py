@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 import stat
 from dataclasses import dataclass, field
@@ -125,7 +127,13 @@ def _finding(code: str, hook: str | None, message: str, detail: str = "") -> Fin
 
 
 INTERPRETERS = frozenset(
-    {"sh", "bash", "zsh", "python", "python3", "node", "uv", "uvx", "deno", "ruby"}
+    {
+        "sh", "bash", "zsh", "dash", "ksh", "fish",
+        "python", "python2", "python3", "py",
+        "node", "deno", "bun", "ruby", "perl", "php",
+        "uv", "uvx", "npx", "pnpm", "yarn", "env",
+        "pwsh", "powershell",
+    }
 )
 
 
@@ -143,28 +151,69 @@ def _expanded_command(hook: HookEntry, cwd: Path) -> str:
     return _substitute_placeholders(command, values)
 
 
-def _unquote(token: str) -> str:
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
-        return token[1:-1]
-    return token
+def _tokens(command: str) -> list[str]:
+    """Split like a shell would, falling back to whitespace on malformed input."""
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _is_interpreter(token: str) -> bool:
+    """Recognise interpreters by basename, so /usr/bin/env counts as one."""
+    name = Path(token).name.lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name in INTERPRETERS
 
 
 def _script_path(hook: HookEntry, cwd: Path | None = None) -> Path | None:
-    """Best effort: the script a command handler invokes directly."""
-    command = _expanded_command(hook, cwd or Path.cwd()) if cwd else hook.command
+    """Best effort: the script this handler actually runs.
+
+    Walks past interpreters and their options -- `/usr/bin/env python3 -u h.py`
+    is three tokens before the script. Returns None when the command is a
+    pipeline, a placeholder or anything else we cannot judge honestly; a wrong
+    guess here means condemning a healthy hook.
+    """
+    command = _expanded_command(hook, cwd) if cwd else hook.command
     if not isinstance(command, str) or not command.strip():
         return None
-    if "${" in command:
-        # An unresolved placeholder means we cannot judge the path at all.
+    if "${" in command or "$(" in command:
         return None
-    first = _unquote(command.strip().split()[0])
-    if first in INTERPRETERS:
-        parts = [_unquote(part) for part in command.strip().split()]
-        first = parts[1] if len(parts) > 1 else ""
-    if not first or first.startswith("-"):
+    if any(symbol in command for symbol in ("|", ";", "&&", "||", ">", "<")):
         return None
-    candidate = Path(os.path.expanduser(first))
-    return candidate if candidate.suffix or candidate.exists() else None
+
+    tokens = _tokens(command)
+    if not tokens:
+        return None
+
+    index = 0
+    while index < len(tokens) and _is_interpreter(tokens[index]):
+        index += 1
+        # Skip interpreter options and their values (-u, -m module, NAME=value).
+        while index < len(tokens) and (
+            tokens[index].startswith("-") or "=" in tokens[index].split("/")[0]
+        ):
+            if tokens[index] in {"-m", "-c"}:
+                return None  # module or inline code: there is no script file
+            index += 1
+        if index < len(tokens) and _is_interpreter(tokens[index]):
+            continue  # env python3 -> keep walking
+        break
+
+    if index >= len(tokens):
+        return None
+    candidate = tokens[index]
+    if candidate.startswith("-"):
+        return None
+    return Path(os.path.expanduser(candidate))
+
+
+def _interpreter_prefixed(hook: HookEntry, cwd: Path) -> bool:
+    """True when the script is handed to an explicit interpreter."""
+    command = _expanded_command(hook, cwd)
+    tokens = _tokens(command)
+    return bool(tokens) and _is_interpreter(tokens[0])
 
 
 def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
@@ -174,12 +223,37 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
     if hook.type != "command" or not isinstance(command, str) or not command.strip():
         return findings
 
+    command = _expanded_command(hook, cwd) or command
     path = _script_path(hook, cwd)
     if path is None:
+        # Unresolvable placeholder, pipeline or inline code -- say so instead of
+        # guessing. The execution probe still runs.
+        if "${" in command:
+            findings.append(
+                _finding(
+                    "P01.UNSET_PLACEHOLDER",
+                    hook.name,
+                    "Command still contains an unresolved placeholder.",
+                    command[:160],
+                )
+            )
+        elif any(sym in command for sym in ("|", ";", "&&", "||", ">", "<")):
+            # A shell construct can hide its own failure -- `cmd 2>/dev/null ||
+            # exit 0` exits cleanly whether or not cmd exists. From the outside
+            # that is indistinguishable from a hook that ran and allowed, so the
+            # honest answer is that startability was not verified.
+            findings.append(
+                _finding(
+                    "P01.NOT_TESTED",
+                    hook.name,
+                    "Shell construct: whether the guard itself ran cannot be verified.",
+                    f"{command[:120]} -- a swallowed error looks exactly like a pass.",
+                )
+            )
         return findings
-    command = _expanded_command(hook, cwd) or command
 
     resolved = path if path.is_absolute() else (cwd / path)
+    directly_invoked = not _interpreter_prefixed(hook, cwd)
     if not path.is_absolute():
         findings.append(
             _finding(
@@ -190,7 +264,11 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
             )
         )
 
-    if " " in str(resolved) and not (command.strip().startswith('"') or "'" in command):
+    # A space only breaks the launch when the shell was not given quotes.
+    unquoted = str(path) not in _tokens(command) or (
+        " " in str(path) and str(path) in command.split('"')[0].split("'")[0]
+    )
+    if " " in str(resolved) and unquoted:
         findings.append(
             _finding(
                 "P01.SPACE_IN_PATH",
@@ -201,6 +279,20 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
         )
 
     if not resolved.exists():
+        # A split path is the more useful diagnosis than "file missing".
+        remainder = command.split(str(path), 1)[0] if str(path) in command else ""
+        rest = command[len(remainder) :] if remainder or True else command
+        joined = rest.strip().strip('"').strip("'")
+        if " " in joined and (cwd / joined).exists() or Path(joined).exists():
+            findings.append(
+                _finding(
+                    "P01.SPACE_IN_PATH",
+                    hook.name,
+                    "The command path contains an unquoted space.",
+                    f"/bin/sh stops at {str(resolved)!r}; quote the path or escape the space.",
+                )
+            )
+            return findings
         findings.append(
             _finding(
                 "P01.MISSING_FILE",
@@ -212,7 +304,6 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
         return findings
 
     mode = resolved.stat().st_mode
-    directly_invoked = _unquote(command.strip().split()[0]) not in INTERPRETERS
     if directly_invoked and not mode & stat.S_IXUSR:
         findings.append(
             _finding(
@@ -258,39 +349,61 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
 
 
 # A process can start and still never reach the hook's own logic: the shell
-# refuses to execute the file, the interpreter cannot open the script, an import
-# fails. Several of these exit with code 2 -- the very code that means "block" --
-# so without this check a hook that never ran is reported as a working guard.
+# refuses to execute the file, the interpreter cannot open the script. Several
+# of these exit with code 2 -- the very code that means "block" -- so without
+# this check a hook that never ran is reported as a working guard.
+#
+# The rule has to be narrow. A correct deny hook writes its reason to stderr and
+# exits 2, and those reasons legitimately contain words like "permission denied"
+# or "not found". Matching on free text would condemn exactly the hooks this
+# tool exists to protect. So: shell-level exit codes, or a message that names a
+# path from the command itself.
 LAUNCH_FAILURE_EXITS = frozenset({126, 127, 49})
-LAUNCH_FAILURE_STDERR = (
-    "no such file or directory",
-    "can't open file",
-    "cannot open file",
-    "command not found",
-    "not found",
-    "cannot execute",
-    "bad interpreter",
-    "permission denied",
-    "is a directory",
-    "modulenotfounderror",
-    "importerror",
-    "syntaxerror",
-    "no module named",
+_MISSING_SCRIPT = re.compile(
+    r"(?:can't open file|cannot open file|No such file or directory)"
+    r"[^'\"]*['\"]?([^'\"\n]+)['\"]?",
+    re.IGNORECASE,
+)
+_INTERPRETER_ERROR = re.compile(
+    r"^(?:Traceback \(most recent call last\)|"
+    r"(?:ModuleNotFoundError|ImportError|SyntaxError|IndentationError):)",
+    re.MULTILINE,
 )
 
 
-def launch_failed(result: RunResult) -> str | None:
-    """Return the reason when the process ran but the hook logic never did."""
+def launch_failed(result: RunResult, command: str = "") -> str | None:
+    """Return the reason when the process ran but the hook logic never did.
+
+    Deliberately conservative: when in doubt the handler counts as having run,
+    because calling a working guard broken is the worse error.
+    """
     if not result.started or result.timed_out:
         return None
     if result.stdout.strip():
         return None
     stderr = (result.stderr or "").strip()
-    if result.exit_code in LAUNCH_FAILURE_EXITS and stderr:
-        return stderr.splitlines()[0][:200]
-    lowered = stderr.lower()
-    if stderr and any(marker in lowered for marker in LAUNCH_FAILURE_STDERR):
-        return stderr.splitlines()[0][:200]
+    if not stderr:
+        return None
+
+    first = stderr.splitlines()[0][:200]
+
+    # Shell-level: cannot execute (126), not found (127), Windows stub (49).
+    if result.exit_code in LAUNCH_FAILURE_EXITS:
+        return first
+
+    # Interpreter could not open the script it was told to run. Only counts when
+    # the path it complains about actually appears in the configured command --
+    # otherwise it is the hook talking about some file of its own.
+    match = _MISSING_SCRIPT.search(stderr)
+    if match:
+        mentioned = match.group(1).strip().rstrip(":")
+        if mentioned and command and mentioned in command:
+            return first
+
+    # The interpreter failed before the hook's own code ran.
+    if _INTERPRETER_ERROR.search(stderr):
+        return first
+
     return None
 
 
@@ -363,7 +476,7 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
             )
         return result
 
-    failure = launch_failed(neutral)
+    failure = launch_failed(neutral, str(hook.command or ""))
     if failure is not None:
         # The process spawned, but the hook never ran: the gate is open.
         result.starts = False
@@ -487,7 +600,26 @@ def _probe_blocking(
 
     deny = run_handler(hook, build_payload(hook, "deny"), limit, cwd)
     result.deny = deny
-    if not deny.started or deny.timed_out or launch_failed(deny) is not None:
+    if not deny.started or deny.timed_out:
+        result.findings.append(
+            _finding(
+                "P08.NO_BLOCK_OBSERVED",
+                hook.name,
+                "The rejection probe did not complete, so blocking is unproven.",
+                f"started={deny.started}, timed_out={deny.timed_out}",
+            )
+        )
+        return False
+    deny_failure = launch_failed(deny, str(hook.command or ""))
+    if deny_failure is not None:
+        result.findings.append(
+            _finding(
+                "P01.SPAWN_FAILED",
+                hook.name,
+                "The rejection probe started but the hook itself never ran.",
+                deny_failure,
+            )
+        )
         return False
 
     payload, _ = _decode_json(deny.stdout)

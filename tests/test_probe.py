@@ -227,5 +227,98 @@ class LaunchFailureTests(ProjectTestCase):
         self.assertIn("P08.BLOCKS_EVERYTHING", codes(probes[0]))
 
 
+
+
+class DenyWordingTests(ProjectTestCase):
+    """Regression for the worst kind of bug this tool can have: calling a
+    working guard broken. A correct deny hook writes its reason to stderr, and
+    those reasons legitimately contain 'permission denied' or 'not found'."""
+
+    WORDINGS = [
+        "Permission denied by policy: destructive command",
+        "command not found in the allowlist",
+        "refused: policy file not found, failing closed",
+        "refused by policy",
+    ]
+
+    def test_stderr_wording_does_not_change_the_verdict(self) -> None:
+        for index, wording in enumerate(self.WORDINGS):
+            with self.subTest(wording=wording):
+                path = self.write_hook(
+                    f"deny{index}.py",
+                    "#!/usr/bin/env python3\n"
+                    "import json, sys\n"
+                    "data = json.load(sys.stdin)\n"
+                    'if "rm " in json.dumps(data):\n'
+                    f"    sys.stderr.write({wording!r})\n"
+                    "    sys.exit(2)\n"
+                    'print(json.dumps({"permissionDecision": "allow"}))\n',
+                )
+                self.simple_settings("PreToolUse", str(path))
+                _, probes = self.probe_all()
+                probe = probes[0]
+                self.assertTrue(probe.can_block, f"{wording}: verdict lost")
+                self.assertFalse(probe.is_broken, f"{wording}: healthy hook broken")
+
+
+class InvocationFormTests(ProjectTestCase):
+    """The common ways people invoke a hook must not be misread as the script."""
+
+    HOOK = (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "data = json.load(sys.stdin)\n"
+        'if "rm " in json.dumps(data):\n'
+        "    sys.exit(2)\n"
+        'print(json.dumps({"permissionDecision": "allow"}))\n'
+    )
+
+    def test_interpreter_prefixes_are_not_mistaken_for_the_script(self) -> None:
+        path = self.write_hook("h.py", self.HOOK)
+        for command in (
+            f"/usr/bin/env python3 {path}",
+            f"python3 {path}",
+            f"python3 -u {path}",
+        ):
+            with self.subTest(command=command):
+                self.simple_settings("PreToolUse", command)
+                _, probes = self.probe_all()
+                probe = probes[0]
+                self.assertNotIn("P01.NO_SHEBANG", codes(probe), command)
+                self.assertFalse(probe.is_broken, command)
+
+    def test_quoted_path_with_space_is_healthy(self) -> None:
+        directory = self.project / ".claude" / "hooks" / "my hooks"
+        directory.mkdir()
+        path = directory / "guard.py"
+        path.write_text(self.HOOK, "utf-8")
+        path.chmod(0o755)
+        self.simple_settings("PreToolUse", f'"{path}"')
+        _, probes = self.probe_all()
+        self.assertTrue(probes[0].starts)
+        self.assertFalse(probes[0].is_broken)
+
+    def test_unquoted_path_with_space_names_the_real_cause(self) -> None:
+        directory = self.project / ".claude" / "hooks" / "my hooks"
+        directory.mkdir()
+        path = directory / "guard.py"
+        path.write_text(self.HOOK, "utf-8")
+        path.chmod(0o755)
+        self.simple_settings("PreToolUse", str(path))
+        _, probes = self.probe_all()
+        self.assertIn("P01.SPACE_IN_PATH", codes(probes[0]))
+
+
+class ConfigurationFailureTests(ProjectTestCase):
+    """A settings file that does not parse means none of its hooks are active."""
+
+    def test_broken_json_is_reported_and_fails(self) -> None:
+        path = self.project / ".claude" / "settings.json"
+        path.write_text('{"hooks": {"PreToolUse": [ {"matcher": "Bash",', "utf-8")
+        from hookprobe.cli import main
+
+        self.assertEqual(main([str(self.project), "--no-home"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

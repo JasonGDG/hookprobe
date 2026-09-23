@@ -83,6 +83,29 @@ def main(argv: list[str] | None = None) -> int:
     config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
 
     schema_findings = check_schema(config)
+    # Load problems that check_schema does not map (broken JSON, unreadable
+    # file, unparsable frontmatter) must not vanish: a settings file that fails
+    # to parse means none of its hooks are active.
+    mapped = {finding.detail for finding in schema_findings}
+    for issue in list(config.issues) + list(config.sandbox_issues):
+        if issue.message in mapped or any(
+            issue.message == finding.message for finding in schema_findings
+        ):
+            continue
+        from .checks import Finding
+        from . import evidence as evidence_module
+
+        entry = evidence_module.lookup(issue.code)
+        severity = entry.severity if entry.title != "Uncatalogued finding" else "critical"
+        schema_findings.append(
+            Finding(
+                code=issue.code,
+                hook=None,
+                severity=severity,
+                message=f"{issue.source.label}: {issue.message}",
+                detail=issue.detail,
+            )
+        )
     probes = []
     for hook in config.hooks:
         probe = probe_hook(hook, project_dir, timeout=args.timeout)

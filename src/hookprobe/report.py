@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Iterable
 
 from .checks import Finding
@@ -62,6 +63,12 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
             "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip()
         )
     return lines
+
+
+def _rejectable() -> frozenset[str]:
+    from .probe import REJECTABLE_EVENTS
+
+    return REJECTABLE_EVENTS
 
 
 def _sorted_findings(findings: Iterable[Finding]) -> list[Finding]:
@@ -138,7 +145,19 @@ def render_text(
                     out.append(f"      evidence: {', '.join(entry.references)}")
                 out.append("")
     else:
-        out.append(f"All {len(probes)} hooks start and answer.")
+        unverified = [
+            probe
+            for probe in probes
+            if any(f.code == "P01.NOT_TESTED" for f in probe.findings)
+            or (probe.hook.event in _rejectable() and probe.can_block is None)
+        ]
+        if unverified:
+            out.append(
+                f"{len(probes)} hooks start and answer; {len(unverified)} could not "
+                "be verified any further (see below)."
+            )
+        else:
+            out.append(f"All {len(probes)} hooks start and answer.")
         out.append("")
 
     warnings = [
@@ -181,9 +200,19 @@ def render_text(
 
 
 def _short(hook: Any) -> str:
+    """A readable label: the script, not the last word of the command line."""
+    from .probe import _script_path
+
+    try:
+        path = _script_path(hook, Path.cwd())
+    except Exception:
+        path = None
+    if path is not None and path.name:
+        return path.name
     command = hook.command if isinstance(hook.command, str) else str(hook.type)
-    token = command.strip().split()[-1] if command.strip() else command
-    return token.rsplit("/", 1)[-1] or hook.name
+    if not isinstance(command, str) or not command.strip():
+        return hook.name
+    return command.strip().split()[0].rsplit("/", 1)[-1] or hook.name
 
 
 def render_json(
