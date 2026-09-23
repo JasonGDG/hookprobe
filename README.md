@@ -234,6 +234,16 @@ start the original it says so and exits 0, the same thing Claude Code does with 
 cannot launch, so wrapping is never stricter than not wrapping. A test asserts exactly that, for
 an allowing and a blocking payload.
 
+The recorder **replaces** each handler's entry in the settings file it lives in; it does not add
+a second entry beside it. That distinction was measured, not assumed: an added entry left the
+original registered too, and one PreToolUse hook fired twice for a single Bash call. With the
+in-place version it fires once, exactly as without the recorder. `--record-remove` reads the
+original command back out of the wrapper, so an unrelated edit made in between is left alone.
+
+Three kinds of handler are named as *not recorded* rather than half-wrapped: managed settings
+(enterprise policy), plugin hooks (their `${CLAUDE_PLUGIN_ROOT}` is only set when Claude Code
+calls them as plugin hooks) and agent frontmatter (markdown, not a settings file).
+
 The closest existing tool, `clooks`, converts command hooks into HTTP hooks behind a daemon.
 This leaves the handlers, the settings shape and the failure modes as they were and only adds a
 witness.

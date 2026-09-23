@@ -476,10 +476,78 @@ class RecorderTests(ProjectTestCase):
 
         path = self.write_hook("guard.py", self.GUARD)
         self.simple_settings("PreToolUse", str(path))
-        config = self.load()
-        text = record.render(self.project, config.hooks, 900.0)
+        record.wrap(self.project, self.load().hooks)
+        # --record reads the configuration *after* the install, so the reload is
+        # part of the flow under test.
+        text = record.render(self.project, self.load().hooks, 900.0)
         self.assertIn("guard.py", text)
         self.assertIn("never", text)
+
+    def test_wrap_replaces_the_handler_instead_of_adding_a_second_one(self) -> None:
+        """Measured against a real session: an appended entry made one PreToolUse
+        hook fire twice for a single Bash call. Replacing in place keeps it at one."""
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        before = [hook.command for hook in self.load().hooks]
+
+        record.wrap(self.project, self.load().hooks)
+        after = [hook.command for hook in self.load().hooks]
+
+        self.assertEqual(len(before), len(after), "wrapping must not add a handler")
+        self.assertNotIn(str(path), after, "the unwrapped original must be gone")
+        self.assertEqual(
+            [record.original_of(command) for command in after],
+            before,
+            "each wrapper must carry exactly the command it replaced",
+        )
+
+    def test_unwrap_deletes_entries_an_older_version_appended(self) -> None:
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        local = self.project / ".claude" / "settings.local.json"
+        legacy = (
+            "HOOKPROBE_LABEL=PreToolUse:guard.py HOOKPROBE_EVENT=PreToolUse "
+            f"HOOKPROBE_ORIGINAL={path} "
+            f"{self.project}/.claude/hooks/hookprobe-recorder.py"
+        )
+        local.write_text(
+            json.dumps(
+                {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": legacy}]}]}}
+            ),
+            "utf-8",
+        )
+
+        record.unwrap(self.project)
+
+        commands = [hook.command for hook in self.load().hooks]
+        self.assertEqual(
+            commands,
+            [str(path)],
+            "a legacy entry must be deleted, not turned into a duplicate handler",
+        )
+
+    def test_plugin_hooks_are_named_rather_than_half_wrapped(self) -> None:
+        """${CLAUDE_PLUGIN_ROOT} is only set when Claude Code calls a plugin hook,
+        so copying such a command into project settings would break it."""
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        hooks = self.load().hooks
+        plugin = hooks[0]
+        plugin.source = type(plugin.source)(
+            kind="plugin", path=plugin.source.path, label="plugin (test)"
+        )
+
+        result = record.wrap(self.project, [plugin])
+
+        self.assertEqual(result.wrapped, [])
+        self.assertEqual(len(result.skipped), 1)
+        self.assertIn("CLAUDE_PLUGIN_ROOT", result.skipped[0][1])
 
 
 if __name__ == "__main__":

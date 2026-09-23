@@ -173,18 +173,27 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.record_install:
         config = load(project_dir, include_home=not args.no_home)
-        wrapped = record_module.wrap(project_dir, config.hooks)
-        print(f"Recording {len(wrapped)} handlers:")
-        for label in wrapped:
+        result = record_module.wrap(project_dir, config.hooks)
+        print(f"Recording {len(result.wrapped)} handlers:")
+        for label in result.wrapped:
             print(f"  {label}")
-        print(f"Settings: {_settings_path_hint(project_dir)}")
+        if result.skipped:
+            print(f"\nNot recorded ({len(result.skipped)}):")
+            for label, reason in result.skipped:
+                print(f"  {label} -- {reason}")
+        if result.files:
+            print("\nChanged in place (restored by --record-remove):")
+            for path in result.files:
+                print(f"  {path}")
+        print("\nEach handler still runs exactly once: the recorder replaces the")
+        print("original entry rather than adding a second one.")
         print("Work as usual, then: hookprobe --record")
         print("Remove again with --record-remove.")
         return 0
 
     if args.record_remove:
         removed = record_module.unwrap(project_dir)
-        print(f"Removed {removed} recorder entries.")
+        print(f"Removed the recorder from {removed} handler(s).")
         return 0
 
     if args.record:

@@ -96,3 +96,8 @@ and the repository is private, so none of this is in anyone else's hands yet.
 - One hook that raises no longer takes the whole report with it. [W11]
 - The two contradictory tables of blocking events were merged into the documented one. [K12]
 - Each tool now receives a rejection payload it would actually carry. [K11 in part]
+- `--record-install` ran every handler twice: it appended a recorder entry next to the
+  original instead of replacing it. Measured in a real session (one PreToolUse hook, one Bash
+  call: 1 invocation before, 2 after, 1 again after the fix). The recorder now rewrites the
+  entry in its own settings file and `--record-remove` restores it; managed, plugin and
+  agent-frontmatter handlers are named as not recordable instead of being copied. [found 23.09.]
