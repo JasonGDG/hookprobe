@@ -106,7 +106,7 @@ figcaption{ font-size:8.2pt; color:var(--ink3); margin-top:4pt; }
 
 <section>
 <h2>Was hookprobe prüft</h2>
-<p>Sechzehn Prüfungen, jede aus einem dokumentierten Fehlerfall abgeleitet. Die Spalte „Lauf nötig“ sagt, ob die Prüfung ohne echte Sitzung auskommt — das ist der Unterschied zwischen kostenlos und token-pflichtig.</p>
+<p>Siebzehn Prüfungen, jede aus einem dokumentierten Fehlerfall abgeleitet. Die Spalte „Lauf nötig“ sagt, ob die Prüfung ohne echte Sitzung auskommt — das ist der Unterschied zwischen kostenlos und token-pflichtig.</p>
 <table>
 <thead><tr><th>Nr.</th><th>Prüfung</th><th>Was schiefgeht</th><th>Lauf nötig</th><th>Beleg</th></tr></thead>
 <tbody>
@@ -126,6 +126,7 @@ figcaption{ font-size:8.2pt; color:var(--ink3); margin-top:4pt; }
 <tr><td class="n">P02</td><td><strong>Schlägt die Ablehnung durch?</strong></td><td>Der Hook feuert, aber sein Verdikt verändert den Aufruf nicht</td><td><strong>ja</strong></td><td>15 Fälle</td></tr>
 <tr><td class="n">P06</td><td>Betriebsart</td><td>Headless verhält sich anders als interaktiv — „ask“ wird still zu „deny“</td><td><strong>ja</strong></td><td>#95726</td></tr>
 <tr><td class="n">—</td><td><strong>Feuern sie noch?</strong></td><td>Hooks, die mitten in der Sitzung aufhören — lange nach jeder einmaligen Prüfung</td><td><span class="mono">--watch</span></td><td>#76322, #16047</td></tr>
+<tr><td class="n">—</td><td><strong>Welcher ist gestorben?</strong></td><td>Ein Wächter stirbt, während die Protokoll-Hooks weiterschlagen — der Melder allein sieht das nicht</td><td><span class="mono">--record</span></td><td>gemessen 23.09.</td></tr>
 </tbody></table>
 
 <div class="warn"><strong>Der wichtigste Befund für die Bauweise.</strong> hookprobe darf sich nicht darauf verlassen, dass der Harness meldet, ob ein Hook gefeuert hat. Über 36 Messläufe zeigt #94275: <span class="mono">hook_started</span> und <span class="mono">hook_response</span> erscheinen im Ereignisstrom <strong>nur für SessionStart</strong>. Die Wirksamkeit wird deshalb an <em>Nebenwirkungen</em> gemessen — an einer Spur, die der Hook selbst hinterlässt.</div>
@@ -230,11 +231,66 @@ A probe proves the moment of the test. For the failures that happen later -- a h
 <tr><td>Fremde Umgebung (#85613)</td><td>Gemessen wird die Umgebung, in der die Sonde läuft</td></tr>
 </tbody></table>
 <h3>Verschoben statt gelöst</h3>
-<p>Zeitabhängige Ausfälle (#16047, #76322) und Aussetzer (#90296) sind mit <span class="mono">--watch</span> erreichbar — aber nur für das, was der Melder selbst beobachtet. Er belegt, dass die <em>Hook-Mechanik</em> lebt, nicht dass <em>dein bestimmter Wächter</em> noch feuert. Ein Wächter, der stirbt, während der Melder weiterschlägt, bleibt unsichtbar.</p>
+<p>Zeitabhängige Ausfälle (#16047, #76322) und Aussetzer (#90296) sind mit <span class="mono">--watch</span> für die Hook-Mechanik als Ganzes erreichbar und mit <span class="mono">--record</span> je Handler — zum Preis, dass jedes Kommando durch einen Recorder läuft (nächster Abschnitt). Was bleibt: die Ablehnungsprobe ist je <em>Werkzeug</em>, nicht je <em>Wächter</em>. Ein Wächter gegen <span class="mono">git push --force</span> sieht <span class="mono">rm -rf</span>, lehnt nichts ab und wird als ungeprüft gemeldet — ehrlich, aber unbefriedigend.</p>
 <p><strong>hookprobe ist ein Thermometer, keine Medizin.</strong> Vor jeder Sitzung laufen lassen — und <span class="mono">--watch</span> währenddessen weiterlaufen lassen.</p>
 
+</section>
+
+<section>
+<h2>Weiterbeobachten: <span class="mono">--watch</span> und <span class="mono">--record</span></h2>
+<p>Eine Sonde beweist den Moment der Messung. Die Ausfälle, die sie nicht sieht, kommen später: Hooks, die mitten in der Sitzung aufhören (#76322), ein Protokoll, das wächst, bis der Handler stirbt (#16047). Dafür gibt es zwei Stufen, beide ohne Modellkosten.</p>
+<table>
+<thead><tr><th></th><th>Frage</th><th>Wie</th><th>Preis</th></tr></thead>
+<tbody>
+<tr><td class="n">--watch</td><td>Feuert <em>irgendein</em> Hook noch, während die Sitzung arbeitet?</td><td>Ein Melder-Hook schreibt je Ereignis eine Zeile; verglichen wird mit den Schreibzeiten der Sitzungsprotokolle desselben Projekts</td><td>drei zusätzliche, nie blockierende Handler</td></tr>
+<tr><td class="n">--record</td><td>Welcher Handler ist gestorben?</td><td>Jeder Kommando-Handler wird <em>in seiner Datei</em> durch einen Recorder ersetzt, der das Original ausführt und Exit-Code, Dauer und Zeitpunkt festhält</td><td>jedes Kommando läuft durch einen Zwischenprozess; <span class="mono">--record-remove</span> stellt alles wieder her</td></tr>
+</tbody></table>
+<pre>Handler                 calls  last result       took   last seen
+PreToolUse:deny-rm.py   34     exit 0, 2 blocked  41 ms  12s ago
+PreToolUse:audit.sh     34     exit 0             8 ms   12s ago
+PostToolUse:log.sh      0      -                  -      never
+
+1 of 3 handlers never ran while the others did: PostToolUse:log.sh</pre>
+<div class="warn"><strong>Ersetzen, nicht danebenstellen.</strong> Die erste Fassung hängte den Recorder <em>neben</em> den Originaleintrag. Claude Code führt beide Dateien zusammen — jeder aufgezeichnete Handler lief doppelt. Gemessen mit einem Zähl-Hook in einer echten Sitzung: 1 Aufruf ohne Recorder, 2 mit der alten Fassung, 1 mit der jetzigen. Der Recorder ist byteweise durchsichtig (stdin, stdout, stderr, Exit-Code), läuft unter derselben Shell wie Claude Code es täte, versteckt seine eigenen Umgebungsvariablen vor dem Handler und wird bei einem Timeout mit dem Handler zusammen beendet. Was er nicht anfasst, sagt er: Firmenrichtlinien, Plugin-Hooks, Agent-Frontmatter, exec-Form mit <span class="mono">args</span>. Und er warnt: Solange aufgezeichnet wird, zeigt die geteilte <span class="mono">settings.json</span> auf ein Skript auf dieser Maschine — nicht committen.</div>
+</section>
+
+<section>
+<h2>Aus mit Absicht: <span class="mono">--ask</span></h2>
+<p>Ein Hook, der aus ist, ist nicht immer ein Fehler. Das Ausführungsrecht fehlt vielleicht, weil jemand das Skript gerade umschreibt; <span class="mono">disableAllHooks</span> steht auf einem Vorführrechner mit Absicht. Der Standardlauf kann das nicht wissen und meldet es jedes Mal, mit Exit-Code 1. <span class="mono">--ask</span> ist der Mittelweg — ausdrücklich anzufordern und nur im Terminal:</p>
+<pre>[1/2] PreToolUse · deny-rm.py  (project (.claude/settings.json))
+  off because: The handler file is not executable.  [P01.NOT_EXECUTABLE]
+  fix would be: chmod +x .claude/hooks/deny-rm.py
+  Is this off on purpose?  [y]es, keep it   [n]o, fix it   [s]kip (Enter)  > y
+  Why? (one line, optional) > being rewritten this week
+  kept. It will be listed as off on purpose from now on.</pre>
+<table>
+<thead><tr><th>Antwort</th><th>Was passiert</th></tr></thead>
+<tbody>
+<tr><td><strong>y</strong></td><td>Grund und Datum landen in <span class="mono">.claude/hookprobe-accepted.json</span>. Der Bericht führt den Hook unter „Off on purpose“, der Exit-Code folgt. Der Eintrag ist an Datei, Ereignis, Matcher, Kommando <em>und die genauen Problemcodes</em> gebunden: ein neues Problem am selben Hook wird wieder gefragt, ein geändertes Kommando fängt bei null an.</td></tr>
+<tr><td><strong>n</strong></td><td>Nur die zwei sicheren Reparaturen: Ausführungsrecht setzen, <span class="mono">disableAllHooks</span> in einer Datei, die hookprobe schreiben darf (nie Firmenrichtlinien). Alles andere bekommt den Handgriff genannt.</td></tr>
+<tr><td><strong>s</strong></td><td>Nichts ändert sich.</td></tr>
+</tbody></table>
+<p>Hooks <em>anschalten</em>, weil sie „gebraucht“ werden, tut hookprobe bewusst nicht: Ob ein Hook gebraucht wird, steht nirgends. Ein Werkzeug, das fremde Einstellungen nach eigenem Ermessen umschreibt, wäre selbst die Art stiller Eingriff, vor der es warnen soll.</p>
+</section>
+
+<section>
+<h2>Gegen fremde Setups geprüft</h2>
+<p>Die eigenen Testfälle stammen von denselben Händen wie die Prüfungen. Deshalb wurde die Sonde am 23.09.2026 auf drei öffentliche Repositories losgelassen, die sie nie gesehen hatte — mit dem erwarteten Urteil <em>vorher</em> aufgeschrieben.</p>
+<table>
+<thead><tr><th>Repository</th><th>Erwartet</th><th>Erster Lauf</th><th>Nach den Korrekturen</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">disler/claude-code-hooks-mastery</span><br>3,9k Sterne, 13 Hooks, alle <span class="mono">uv run …</span></td><td>alle gesund, PreToolUse blockiert</td><td><span class="tag tag-crit">13 von 13 „not protecting anything“</span> — das Unterkommando <span class="mono">run</span> wurde für das Skript gehalten</td><td><span class="tag tag-ok">13 laufen, PreToolUse blockiert, Exit 0</span></td></tr>
+<tr><td><span class="mono">parcadei/Continuous-Claude-v3</span><br>3,9k Sterne, 36 Hooks unter <span class="mono">$HOME/.claude/hooks/dist</span></td><td>hier nicht installiert, also fehlt jede Datei</td><td>richtiges Urteil, falsche Gründe: <span class="mono">$HOME/…</span> als relativer Pfad, 12 fehlende Dateien sollten „Exit 2 zurückgeben“, 32 Agent-Dateien „schalten Hooks ab“</td><td><span class="tag tag-ok">36 fehlende Dateien, sonst nichts</span></td></tr>
+<tr><td><span class="mono">karanb192/claude-code-hooks</span><br>525 Sterne, Plugin-Wächter über <span class="mono">--settings</span></td><td>zwei Wächter, beide laufen</td><td>beide „unaufgelöster Platzhalter“</td><td><span class="tag tag-ok">protect-secrets blockiert</span>; git-safety läuft, sieht aber <span class="mono">rm -rf</span> statt <span class="mono">git push --force</span> — als <em>untested</em> gemeldet, nicht als kaputt</td></tr>
+</tbody></table>
+<p>Sechs Fehlalarme kamen dabei heraus, jeder behoben und durch einen Test festgenagelt: Runner-Unterkommandos, <span class="mono">$HOME</span> im Kommando, nodes „Cannot find module“ als Startfehler, der Plugin-Wurzelpfad für eine per Pfad angegebene <span class="mono">hooks/hooks.json</span>, Flow-Listen im Agent-Frontmatter und Determinismus nach stdout-Bytes statt nach Verdikt. Ein zweiter Code-Review (Codex, 23.09.) fand danach 15 weitere Probleme, vor allem im Recorder; 14 sind behoben, das fünfzehnte ist die Warnung oben.</p>
+<div class="warn"><strong>Selbst prüfen, ob es Grütze ist.</strong> <span class="mono">git clone --depth 1 https://github.com/disler/claude-code-hooks-mastery &amp;&amp; cd claude-code-hooks-mastery &amp;&amp; env -i HOME="$HOME" PATH="$PATH" CLAUDE_PROJECT_DIR="$PWD" hookprobe . --no-home</span> — das <span class="mono">env -i</span> ist Absicht, einige dieser Hooks rufen bei gesetztem Schlüssel eine Sprach-API. Die Frage ist nie, ob das Werkzeug etwas findet, sondern ob es das Richtige findet und sonst still bleibt: eine gesunde Konfiguration muss gesund heißen, eine mit genau einem Defekt muss genau diesen einen zeigen.</div>
+</section>
+
+<section>
 <h2 style="margin-top:16pt">Abgrenzung zu vorhandenen Werkzeugen</h2>
 <p>Drei Werkzeuge tragen einen ähnlichen Namen, keines misst die Wirksamkeit. Stand 22.09.2026, alle MIT-lizenziert, alle ohne nennenswerte Verbreitung.</p>
+<p>Für die laufende Beobachtung gibt es zwei Nachbarn: <span class="mono">clooks</span> ersetzt Kommando-Hooks durch HTTP-Hooks hinter einem Daemon, <span class="mono">ccboard</span> verwaltet Hooks, prüft aber nicht, ob der einzelne noch feuert. Keiner lässt Handler, Settings-Form und Fehlverhalten unverändert und fügt nur einen Zeugen hinzu.</p>
 <table>
 <thead><tr><th>Werkzeug</th><th>Was es tut</th><th>startet?</th><th>antwortet?</th><th>wirksam?</th></tr></thead>
 <tbody>
@@ -246,5 +302,5 @@ A probe proves the moment of the test. For the failures that happen later -- a h
 <tr><td><strong>hookprobe</strong></td><td>Ausführung wie der Harness + Differenzmessung</td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-ok">ja</span></td></tr>
 </tbody></table>
 
-<div class="foot">hookprobe · Dokumentation vom 22.09.2026 · Alle Issue-Nummern beziehen sich auf <span class="mono">github.com/anthropics/claude-code</span> und wurden einzeln auf Titel, Status und Inhalt geprüft. Zwei Hinweise zur Belegqualität: In #95354 hat der Melder einen Teil seiner Analyse selbst zurückgezogen, und #16047 („hört nach 2,5 Stunden auf“) war kein Fehler des Harness, sondern ein auf 48 GB angewachsenes Protokoll. Beide Fälle stützen das Werkzeug trotzdem — der erste als Beobachtbarkeitsproblem, der zweite als Grenze.</div>
+<div class="foot">hookprobe · Dokumentation, Stand 23.09.2026 · Alle Issue-Nummern beziehen sich auf <span class="mono">github.com/anthropics/claude-code</span> und wurden einzeln auf Titel, Status und Inhalt geprüft. Zwei Hinweise zur Belegqualität: In #95354 hat der Melder einen Teil seiner Analyse selbst zurückgezogen, und #16047 („hört nach 2,5 Stunden auf“) war kein Fehler des Harness, sondern ein auf 48 GB angewachsenes Protokoll. Beide Fälle stützen das Werkzeug trotzdem — der erste als Beobachtbarkeitsproblem, der zweite als Grenze.</div>
 </section>

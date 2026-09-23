@@ -316,8 +316,8 @@ cannot be verified from outside — hookprobe says so instead of reporting a pas
 ## Development
 
 ```sh
-python -m unittest discover -v   # 27 unit tests
-python tests/stress.py -v        # 47 fixtures with a written-down expected verdict
+python -m unittest discover -v   # 68 unit tests
+python tests/stress.py -v        # 49 fixtures with a written-down expected verdict
 python tests/scenarios.py        # three whole configurations, end to end
 ```
 

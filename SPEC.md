@@ -2,6 +2,13 @@
 
 Prüft, ob die Hooks von Claude Code **tatsächlich wirken** — nicht, ob sie konfiguriert sind.
 
+> **Stand.** Dies ist die Entwurfsspezifikation vom 22.09.2026, bewusst unverändert gelassen, damit sich
+> Entwurf und Ergebnis vergleichen lassen. Was seitdem dazukam und wo der Entwurf danebenlag, steht im
+> README (`--watch`, `--record`, `--ask`, „Against other people's setups") und in KNOWN-ISSUES.md.
+> Zwei Abweichungen vom Entwurf: jeder Handler wird im Standardlauf **fünfmal** ausgeführt, nicht einmal
+> (Ablehnungsprobe, Determinismus, Köder); und die Effektivität wird nicht je Hook, sondern je Kanal
+> gemessen (hookprobes eigener Deny-Hook gegen einen Kontrolllauf).
+
 ## Leitsatz
 Konfiguriert und wirksam sind zwei verschiedene Eigenschaften; heute ist nur die erste beobachtbar
 (anthropics/claude-code#82323). Fail-open ist dokumentiertes Verhalten: „a mistyped path in settings.json
