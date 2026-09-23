@@ -364,6 +364,12 @@ _MISSING_SCRIPT = re.compile(
     r"[^'\"]*['\"]?([^'\"\n]+)['\"]?",
     re.IGNORECASE,
 )
+# "/bin/sh: ..." or "python3: ..." at the very start means the shell or the
+# interpreter is complaining -- not the hook. A hook's own message does not
+# carry that prefix, which is what keeps this apart from a policy refusal.
+_SHELL_COMPLAINT = re.compile(
+    r"^(?:/[\w./-]*/)?(?:ba|z|da|k|fi)?sh: ", re.IGNORECASE
+)
 _INTERPRETER_ERROR = re.compile(
     r"^(?:Traceback \(most recent call last\)|"
     r"(?:ModuleNotFoundError|ImportError|SyntaxError|IndentationError):)",
@@ -389,6 +395,11 @@ def launch_failed(result: RunResult, command: str = "") -> str | None:
 
     # Shell-level: cannot execute (126), not found (127), Windows stub (49).
     if result.exit_code in LAUNCH_FAILURE_EXITS:
+        return first
+
+    # The shell itself refused the command line -- a quote it could not match,
+    # a syntax error. Exit code varies by shell, so the prefix is the signal.
+    if result.exit_code not in (0, None) and _SHELL_COMPLAINT.match(first):
         return first
 
     # Interpreter could not open the script it was told to run. Only counts when
@@ -511,7 +522,7 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
     if neutral.stdout.strip() and problem and not plain_text_allowed:
         mapping = {
             "preamble": "P09.PREAMBLE",
-            "multiple": "P09.MULTIPLE_OBJECTS",
+            "multiple": "P09.MULTIPLE_OBJECTS",  # treated as plain text, so the decision is lost
             "not-json": "P09.NOT_JSON",
             "not-object": "P09.NOT_JSON",
             "empty": "P09.NOT_JSON",
@@ -521,7 +532,9 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
             _finding(
                 code,
                 hook.name,
-                "Output on stdout is not a single JSON object.",
+                "Output on stdout is not a single JSON object, so no decision reaches Claude."
+                if hook.event in REJECTABLE_EVENTS
+                else "Output on stdout is not a single JSON object.",
                 (neutral.stdout[:120] or "").replace("\n", " "),
             )
         )
@@ -558,7 +571,19 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
                 )
             )
 
-    if hook.event in REJECTABLE_EVENTS:
+    if hook.async_ is True:
+        # The handler may well exit 2 -- it just does not matter. The action it
+        # would have controlled has already happened.
+        result.can_block = False
+        result.findings.append(
+            _finding(
+                "P08.ASYNC_CANNOT_BLOCK",
+                hook.name,
+                "Declared async, so its decision fields have no effect.",
+                "Runs in the background; the action it would control is already done.",
+            )
+        )
+    elif hook.event in REJECTABLE_EVENTS:
         result.can_block = _probe_blocking(hook, cwd, limit, result)
     else:
         # The event can block, but nothing in a neutral probe would be rejected.

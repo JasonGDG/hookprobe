@@ -32,6 +32,14 @@ EVIDENCE: dict[str, Evidence] = {
     entry.code: entry
     for entry in (
         _e(
+            "P08.ASYNC_CANNOT_BLOCK",
+            "Async handler cannot block",
+            "critical",
+            'A handler with "async": true runs in the background. The documentation is explicit: "Async hooks can\'t block or control Claude\'s behavior: response fields like decision, permissionDecision, and continue have no effect, because the action they would have controlled has already completed." A rejection path in such a handler is decoration.',
+            'Remove "async": true from a handler that is meant to decide, or move the decision into a synchronous handler and keep only the slow work async.',
+            "docs:run-hooks-in-the-background",
+        ),
+        _e(
             "P08.BLOCKS_EVERYTHING",
             "Handler rejects the neutral payload too",
             "warning",

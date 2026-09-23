@@ -208,10 +208,19 @@ cannot be verified from outside — hookprobe says so instead of reporting a pas
 ## Development
 
 ```sh
-python -m unittest discover -v
+python -m unittest discover -v   # 27 unit tests
+python tests/stress.py -v        # 33 fixtures with a written-down expected verdict
 ```
 
 Every test mirrors a documented failure case; the fixtures are real files on disk, not mocks.
+
+`tests/stress.py` is the harder one: each fixture carries the verdict hookprobe is supposed to
+reach, written down before the run. Three groups — **healthy** hooks that must never be called
+broken, **broken** ones that must be caught with the right reason, and **adversarial** ones
+built to fool the probe, where "unverifiable" counts as a pass and a confident wrong answer
+counts as a failure. It found four real defects the unit tests missed, including a shell syntax
+error being read as a working guard and `async: true` handlers being credited with blocking
+they cannot do.
 
 ## License
 
