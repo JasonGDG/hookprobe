@@ -32,6 +32,22 @@ EVIDENCE: dict[str, Evidence] = {
     entry.code: entry
     for entry in (
         _e(
+            "P08.BLOCKS_EVERYTHING",
+            "Handler rejects the neutral payload too",
+            "warning",
+            "The handler exits 2 even for an ordinary tool call, so it does not filter -- it blocks the event outright. That is a valid choice for a kill switch and a mistake everywhere else.",
+            "Narrow the rejection condition, or confirm on purpose that this event should always be blocked.",
+            "docs:decision-control",
+        ),
+        _e(
+            "P09.PLAIN_TEXT",
+            "Plain-text output is used as context",
+            "info",
+            "For UserPromptSubmit, UserPromptExpansion, SessionStart and PostModelSwitch, Claude Code adds plain stdout to the context Claude can see. JSON is only needed for structured control.",
+            "Nothing to repair unless the handler meant to steer a decision, which requires JSON.",
+            "docs:json-parsing",
+        ),
+        _e(
             "P01.MISSING_FILE",
             "Hook file is missing",
             "critical",

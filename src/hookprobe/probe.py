@@ -257,6 +257,43 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
     return findings
 
 
+# A process can start and still never reach the hook's own logic: the shell
+# refuses to execute the file, the interpreter cannot open the script, an import
+# fails. Several of these exit with code 2 -- the very code that means "block" --
+# so without this check a hook that never ran is reported as a working guard.
+LAUNCH_FAILURE_EXITS = frozenset({126, 127, 49})
+LAUNCH_FAILURE_STDERR = (
+    "no such file or directory",
+    "can't open file",
+    "cannot open file",
+    "command not found",
+    "not found",
+    "cannot execute",
+    "bad interpreter",
+    "permission denied",
+    "is a directory",
+    "modulenotfounderror",
+    "importerror",
+    "syntaxerror",
+    "no module named",
+)
+
+
+def launch_failed(result: RunResult) -> str | None:
+    """Return the reason when the process ran but the hook logic never did."""
+    if not result.started or result.timed_out:
+        return None
+    if result.stdout.strip():
+        return None
+    stderr = (result.stderr or "").strip()
+    if result.exit_code in LAUNCH_FAILURE_EXITS and stderr:
+        return stderr.splitlines()[0][:200]
+    lowered = stderr.lower()
+    if stderr and any(marker in lowered for marker in LAUNCH_FAILURE_STDERR):
+        return stderr.splitlines()[0][:200]
+    return None
+
+
 def _decode_json(text: str) -> tuple[dict[str, Any] | None, str | None]:
     """Parse hook stdout the way the harness does: exactly one JSON object."""
     stripped = text.strip()
@@ -324,6 +361,22 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
                     neutral.spawn_error or "",
                 )
             )
+        return result
+
+    failure = launch_failed(neutral)
+    if failure is not None:
+        # The process spawned, but the hook never ran: the gate is open.
+        result.starts = False
+        result.answers = False
+        result.can_block = False if hook.event in BLOCKING_EVENTS else None
+        result.findings.append(
+            _finding(
+                "P01.SPAWN_FAILED",
+                hook.name,
+                "The command started but the hook itself never ran.",
+                failure,
+            )
+        )
         return result
 
     if neutral.timed_out:
@@ -421,9 +474,20 @@ def _probe_blocking(
     hook: HookEntry, cwd: Path, limit: float, result: HookProbe
 ) -> bool | None:
     """Second run with a payload the hook is expected to reject."""
+    neutral_blocked = result.neutral is not None and result.neutral.exit_code == 2
+    if neutral_blocked:
+        result.findings.append(
+            _finding(
+                "P08.BLOCKS_EVERYTHING",
+                hook.name,
+                "Rejects even an ordinary tool call -- this blocks the event outright.",
+            )
+        )
+        return True
+
     deny = run_handler(hook, build_payload(hook, "deny"), limit, cwd)
     result.deny = deny
-    if not deny.started or deny.timed_out:
+    if not deny.started or deny.timed_out or launch_failed(deny) is not None:
         return False
 
     payload, _ = _decode_json(deny.stdout)

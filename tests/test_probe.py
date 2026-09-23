@@ -185,9 +185,49 @@ class EvidenceTests(unittest.TestCase):
                         used.add(part)
         self.assertTrue(used)
         for code in used:
-            if code == "P09.PLAIN_TEXT":
-                continue
-            self.assertTrue(evidence.lookup(code).title, code)
+            entry = evidence.lookup(code)
+            self.assertNotEqual(entry.title, "Uncatalogued finding", code)
+
+
+
+
+class LaunchFailureTests(ProjectTestCase):
+    """A process can start while the hook logic never runs -- and several of
+    those failures exit with code 2, the code that means "block"."""
+
+    def test_missing_script_behind_an_interpreter_is_not_a_working_guard(self) -> None:
+        missing = self.project / ".claude" / "hooks" / "gone.py"
+        self.simple_settings("PreToolUse", f"python3 {missing}")
+        _, probes = self.probe_all()
+        probe = probes[0]
+        self.assertFalse(probe.starts, "python3 exits 2 here -- that is not a block")
+        self.assertFalse(probe.can_block)
+        self.assertTrue(probe.is_broken)
+        self.assertIn("P01.SPAWN_FAILED", codes(probe))
+
+    def test_unusable_shebang_interpreter_is_reported_as_not_starting(self) -> None:
+        path = self.write_hook("bad.sh", "#!/usr/bin/nonexistent-interp\necho x\n")
+        self.simple_settings("PreToolUse", str(path))
+        _, probes = self.probe_all()
+        self.assertFalse(probes[0].starts)
+        self.assertIn("P01.MISSING_INTERPRETER", codes(probes[0]))
+
+    def test_unquoted_space_in_path_breaks_the_launch(self) -> None:
+        directory = self.project / ".claude" / "hooks" / "with space"
+        directory.mkdir()
+        path = directory / "deny.sh"
+        path.write_text("#!/bin/sh\nexit 2\n", "utf-8")
+        path.chmod(0o755)
+        self.simple_settings("PreToolUse", str(path))
+        _, probes = self.probe_all()
+        self.assertFalse(probes[0].starts)
+
+    def test_handler_that_rejects_everything_is_flagged(self) -> None:
+        path = self.write_hook("always.sh", "#!/bin/sh\nread -r p\nexit 2\n")
+        self.simple_settings("PreToolUse", str(path))
+        _, probes = self.probe_all()
+        self.assertTrue(probes[0].can_block)
+        self.assertIn("P08.BLOCKS_EVERYTHING", codes(probes[0]))
 
 
 if __name__ == "__main__":
