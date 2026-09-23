@@ -45,10 +45,12 @@ a handler writing `yes` in a loop; the probe timeout bounds the first read, not 
 (`read `, `stdin`) match ordinary comments. `run_handler(..., stdin_mode="empty")` exists and is
 never called, so the empty-stdin probe promised in the spec does not happen.
 
-**Only six tools have a rejection payload.** [K11 remainder]
-`Bash`, `Write`, `Edit`, `NotebookEdit`, `Read`, `WebFetch`. Everything else — MCP tools above
-all — receives the Bash-shaped payload, so a working guard for those tools can still come back as
-"rejected nothing".
+**The rejection payload is per tool, not per guard.** [K11 remainder]
+Six tools have one (`Bash`, `Write`, `Edit`, `NotebookEdit`, `Read`, `WebFetch`); everything
+else, MCP tools above all, receives the Bash-shaped payload. And even for Bash there is one
+payload: a guard against `git push --force` (karanb192's git-safety.js) sees `rm -rf`, rejects
+nothing, and is reported as untested. Correct, but a working guard stays unverified until the
+probe can read what a guard is looking for.
 
 **Not every blocking signal is recognised.** [W6]
 `{"continue": false}` is not read as a stop signal, and `hookSpecificOutput` without
@@ -101,3 +103,11 @@ and the repository is private, so none of this is in anyone else's hands yet.
   call: 1 invocation before, 2 after, 1 again after the fix). The recorder now rewrites the
   entry in its own settings file and `--record-remove` restores it; managed, plugin and
   agent-frontmatter handlers are named as not recordable instead of being copied. [found 23.09.]
+- Six false alarms found by pointing the probe at three public repositories on 23.09.: `uv run
+  x.py` read as a script named `run` (13 of 13 healthy hooks "not protecting anything"), `$HOME`
+  left unexpanded and called a relative path, node's "Cannot find module" not recognised as a
+  failed launch (12 missing hooks told to "return exit code 2"), `${CLAUDE_PLUGIN_ROOT}` unresolved
+  for a `hooks/hooks.json` given via `--settings`, flow-style lists in agent frontmatter rejected
+  (32 agents "switch hooks off"), and determinism judged by stdout bytes instead of verdict (a
+  Setup hook quoting the session id was "nondeterministic"). Each is pinned by a test; the README
+  section "Against other people's setups" has the table. [found 23.09.]

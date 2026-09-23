@@ -550,5 +550,174 @@ class RecorderTests(ProjectTestCase):
         self.assertIn("CLAUDE_PLUGIN_ROOT", result.skipped[0][1])
 
 
+class ForeignSetupTests(ProjectTestCase):
+    """Three popular public hook setups produced false alarms on 23.09.2026
+    (disler/claude-code-hooks-mastery, parcadei/Continuous-Claude-v3,
+    karanb192/claude-code-hooks). Each case is the smallest fixture that
+    reproduced one of them, with the verdict that is actually right."""
+
+    def _hook(self, command: str):
+        self.simple_settings("PreToolUse", command)
+        return self.load().hooks[0]
+
+    def test_uv_run_resolves_to_the_script_not_the_subcommand(self) -> None:
+        from hookprobe.probe import _script_path
+
+        path = self.write_hook("guard.py", DENY_EXIT_2)
+        self.assertEqual(_script_path(self._hook(f"uv run {path}"), self.project), path)
+
+    def test_uv_run_guard_is_healthy_when_it_is(self) -> None:
+        # 13 of 13 hooks were reported "not protecting anything" because `run`
+        # was taken for the script and did not exist.
+        import shutil
+
+        if shutil.which("uv") is None:
+            self.skipTest("uv not installed")
+        path = self.write_hook("guard.py", DENY_EXIT_2)
+        self.simple_settings("PreToolUse", f"uv run {path}")
+        _, probes = self.probe_all()
+        self.assertFalse(probes[0].is_broken)
+        self.assertNotIn("P01.MISSING_FILE", codes(probes[0]))
+        self.assertTrue(probes[0].can_block)
+
+    def test_script_names_and_package_names_are_not_files(self) -> None:
+        from hookprobe.probe import _script_path
+
+        for command in (
+            "pnpm run lint",
+            "npm run check",
+            "npx prettier --check .",
+            "uvx ruff check",
+            "uv run pytest",
+            "my-hook --strict",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(_script_path(self._hook(command), self.project))
+
+    def test_home_variable_is_expanded_as_the_shell_would(self) -> None:
+        from hookprobe.probe import _script_path
+
+        resolved = _script_path(self._hook("bash $HOME/.claude/hooks/x.sh"), self.project)
+        self.assertEqual(resolved, Path.home() / ".claude" / "hooks" / "x.sh")
+
+    def test_node_missing_module_is_a_failed_launch_not_a_wrong_exit_code(self) -> None:
+        # 12 hooks whose file did not exist were told to "return exit code 2".
+        import shutil
+
+        if shutil.which("node") is None:
+            self.skipTest("node not installed")
+        self.simple_settings("PreToolUse", f"node {self.project}/.claude/hooks/gone.mjs")
+        _, probes = self.probe_all()
+        self.assertFalse(probes[0].starts)
+        self.assertIn("P01.MISSING_FILE", codes(probes[0]))
+        self.assertNotIn("P08.EXIT_ONE_ON_REJECT", codes(probes[0]))
+
+    def test_explicit_plugin_hooks_file_gets_its_plugin_root(self) -> None:
+        from hookprobe.checks import _placeholder_values
+        from hookprobe.config import load
+        from hookprobe.probe import probe_hook
+
+        plugin = self.project / "plugins" / "git-safety"
+        (plugin / "hooks").mkdir(parents=True)
+        script = plugin / "guard.py"
+        script.write_text(DENY_EXIT_2, "utf-8")
+        script.chmod(0o755)
+        hooks_json = plugin / "hooks" / "hooks.json"
+        hooks_json.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": 'python3 "${CLAUDE_PLUGIN_ROOT}/guard.py"',
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            "utf-8",
+        )
+        config = load(self.project, explicit_settings=[hooks_json], include_home=False)
+        hook = config.hooks[0]
+
+        self.assertEqual(
+            _placeholder_values(hook, self.project)["CLAUDE_PLUGIN_ROOT"], str(plugin)
+        )
+        probe = probe_hook(hook, self.project)
+        self.assertNotIn("P01.UNSET_PLACEHOLDER", codes(probe))
+        self.assertTrue(probe.can_block)
+
+    def test_context_that_quotes_the_payload_is_not_nondeterministic(self) -> None:
+        # disler's setup.py echoes session id and cwd into additionalContext;
+        # comparing raw stdout filed it as "different answers".
+        body = (
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "d = json.load(sys.stdin)\n"
+            "print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart',"
+            " 'additionalContext': 'Session: ' + d.get('session_id', '') + ' cwd: ' + d.get('cwd', '')}}))\n"
+        )
+        path = self.write_hook("ctx.py", body)
+        self.simple_settings("SessionStart", str(path), matcher=None)
+        _, probes = self.probe_all()
+        self.assertFalse(probes[0].is_broken)
+        self.assertNotIn("P11.NONDETERMINISTIC", codes(probes[0]))
+        self.assertNotIn("P11.PAYLOAD_SENSITIVE", codes(probes[0]))
+
+    def test_a_guard_whose_verdict_flips_is_still_caught(self) -> None:
+        counter = self.project / "calls.txt"
+        body = (
+            "#!/usr/bin/env python3\n"
+            "import sys, pathlib\n"
+            f"p = pathlib.Path({str(counter)!r})\n"
+            "n = int(p.read_text()) + 1 if p.exists() else 1\n"
+            "p.write_text(str(n))\n"
+            "sys.exit(2 if n % 2 else 0)\n"
+        )
+        path = self.write_hook("flip.py", body)
+        self.simple_settings("PreToolUse", str(path))
+        _, probes = self.probe_all()
+        self.assertIn("P11.NONDETERMINISTIC", codes(probes[0]))
+
+    def test_agent_frontmatter_flow_list_is_readable(self) -> None:
+        agents = self.project / ".claude" / "agents"
+        agents.mkdir()
+        (agents / "aegis.md").write_text(
+            "---\nname: aegis\ndescription: x\nmodel: opus\n"
+            "tools: [Read, Bash, Grep, Glob]\n---\n\n# Aegis\n",
+            "utf-8",
+        )
+        self.simple_settings("PreToolUse", str(self.write_hook("g.py", DENY_EXIT_2)))
+        config = self.load()
+        self.assertEqual(
+            [i.code for i in config.issues if i.code == "CONFIG.FRONTMATTER_UNPARSED"], []
+        )
+
+    def test_unreadable_frontmatter_is_not_a_switched_off_hook(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from hookprobe.cli import main
+
+        agents = self.project / ".claude" / "agents"
+        agents.mkdir()
+        (agents / "odd.md").write_text("---\nname: odd\nx: !tag value\n---\n", "utf-8")
+        self.simple_settings("PreToolUse", str(self.write_hook("g.py", DENY_EXIT_2)))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main([str(self.project), "--no-home"])
+        text = buffer.getvalue()
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("switch hooks off", text)
+        self.assertIn("CONFIG.FRONTMATTER_UNPARSED", text)
+
+
 if __name__ == "__main__":
     unittest.main()

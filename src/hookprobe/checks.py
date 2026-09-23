@@ -993,11 +993,19 @@ def _inferred_project_dir(hook: HookEntry) -> Path:
 
 
 def _placeholder_values(hook: HookEntry, cwd: Path) -> dict[str, str | None]:
-    plugin_root = (
-        hook.source.path.parent.parent
-        if hook.source.kind == "plugin"
-        else None
-    )
+    source = hook.source
+    plugin_root: Path | None = None
+    if source.kind == "plugin":
+        plugin_root = source.path.parent.parent
+    elif (
+        source.kind == "explicit"
+        and source.path.name == "hooks.json"
+        and source.path.parent.name == "hooks"
+    ):
+        # `--settings some-plugin/hooks/hooks.json`: the plugin layout is fixed,
+        # so the root is two levels up. Without this every plugin hook probed
+        # by file fails on ${CLAUDE_PLUGIN_ROOT} and is called broken.
+        plugin_root = source.path.parent.parent
     return {
         "CLAUDE_PROJECT_DIR": os.fspath(_inferred_project_dir(hook)),
         "CLAUDE_PLUGIN_ROOT": os.fspath(plugin_root) if plugin_root else None,

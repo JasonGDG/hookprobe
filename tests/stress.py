@@ -113,6 +113,24 @@ CASES: list[Case] = [
         starts=True, can_block=True, broken=False,
     ),
     Case(
+        "run through uv, as disler/claude-code-hooks-mastery configures all 13 hooks",
+        "healthy",
+        files={"g.py": PY_DENY},
+        command="uv run {g.py}",
+        starts=True, can_block=True, broken=False,
+        forbids=("P01.MISSING_FILE", "P01.RELATIVE_PATH"),
+        note="`run` is a subcommand, not the script; 23.09. this read as 'file does not exist'",
+    ),
+    Case(
+        "node cannot find the module: a failed launch, not a wrong exit code",
+        "broken",
+        command="node /nonexistent/hookprobe-stress/gone.mjs",
+        starts=False, broken=True,
+        wants=("P01.MISSING_FILE",),
+        forbids=("P08.EXIT_ONE_ON_REJECT",),
+        note="Continuous-Claude-v3: 12 missing hooks were told to 'return exit code 2'",
+    ),
+    Case(
         "deny reason on stderr says 'permission denied'",
         "healthy",
         files={"g.py": py(

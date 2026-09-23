@@ -154,6 +154,28 @@ def _single_quoted(value: str, line_number: int) -> str:
     return "".join(result)
 
 
+def _split_flow(inner: str) -> list[str]:
+    """Split a flow list on commas that are not inside quotes."""
+    items: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for char in inner:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+            current.append(char)
+        elif char == ",":
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    items.append("".join(current))
+    return [item for item in items if item.strip()]
+
+
 def _scalar(value: str, line_number: int) -> Any:
     if not value:
         raise _FrontmatterError(f"line {line_number} contains an empty scalar")
@@ -179,6 +201,13 @@ def _scalar(value: str, line_number: int) -> Any:
                 f"line {line_number} contains an unterminated single-quoted scalar"
             )
         return _single_quoted(value, line_number)
+    if value.startswith("[") and value.endswith("]"):
+        # Flow-style list, `tools: [Read, Bash]`. Agent files use it all the
+        # time; refusing it reported 32 agents of one repo as unreadable.
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [_scalar(item.strip(), line_number) for item in _split_flow(inner)]
     if value != "*" and value[0] in "[{&*!>|":
         raise _FrontmatterError(
             f"line {line_number} uses unsupported YAML syntax"

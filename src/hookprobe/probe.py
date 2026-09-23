@@ -122,10 +122,46 @@ INTERPRETERS = frozenset(
         "sh", "bash", "zsh", "dash", "ksh", "fish",
         "python", "python2", "python3", "py",
         "node", "deno", "bun", "ruby", "perl", "php",
-        "uv", "uvx", "npx", "pnpm", "yarn", "env",
+        "uv", "uvx", "npx", "npm", "pnpm", "yarn", "bunx", "poetry", "pipx", "pdm", "env",
         "pwsh", "powershell",
     }
 )
+
+
+# Runners whose first argument is a subcommand, not the script. disler's
+# hooks-mastery repo (3.9k stars) configures every hook as `uv run x.py`; taking
+# `run` for the script reported all 13 as "file does not exist".
+RUNNER_SUBCOMMANDS = {
+    "uv": {"run"},
+    "deno": {"run"},
+    "poetry": {"run"},
+    "pipx": {"run"},
+    "pdm": {"run"},
+    "npm": {"run", "exec", "x"},
+    "pnpm": {"run", "exec", "dlx"},
+    "yarn": {"run", "exec", "dlx"},
+    "bun": {"run", "x"},
+}
+# `pnpm run lint` names a package.json script, never a file on disk.
+SCRIPT_NAME_RUNNERS = frozenset({"npm", "pnpm", "yarn"})
+# `npx foo`, `uvx foo`, `pipx run foo`: a package or binary name, never a path.
+RUNNER_ARGUMENT_IS_PACKAGE = frozenset({"npx", "uvx", "bunx", "pipx"})
+
+
+def _basename(token: str) -> str:
+    name = Path(token).name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _skip_options(tokens: list[str], index: int) -> int | None:
+    """Step over options and NAME=value pairs; None when -m / -c means no file."""
+    while index < len(tokens) and (
+        tokens[index].startswith("-") or "=" in tokens[index].split("/")[0]
+    ):
+        if tokens[index] in {"-m", "-c"}:
+            return None
+        index += 1
+    return index
 
 
 def _expanded_command(hook: HookEntry, cwd: Path) -> str:
@@ -139,7 +175,10 @@ def _expanded_command(hook: HookEntry, cwd: Path) -> str:
         values = _placeholder_values(hook, cwd)
     except Exception:
         return command
-    return _substitute_placeholders(command, values)
+    # The harness hands the command to a shell, where $HOME resolves. Without
+    # this, "bash $HOME/.claude/hooks/x.sh" is judged as a relative path named
+    # "$HOME/..." -- Continuous-Claude-v3 configures 36 hooks that way.
+    return os.path.expandvars(_substitute_placeholders(command, values))
 
 
 def _tokens(command: str) -> list[str]:
@@ -152,10 +191,7 @@ def _tokens(command: str) -> list[str]:
 
 def _is_interpreter(token: str) -> bool:
     """Recognise interpreters by basename, so /usr/bin/env counts as one."""
-    name = Path(token).name.lower()
-    if name.endswith(".exe"):
-        name = name[:-4]
-    return name in INTERPRETERS
+    return _basename(token) in INTERPRETERS
 
 
 def _script_path(hook: HookEntry, cwd: Path | None = None) -> Path | None:
@@ -180,14 +216,22 @@ def _script_path(hook: HookEntry, cwd: Path | None = None) -> Path | None:
 
     index = 0
     while index < len(tokens) and _is_interpreter(tokens[index]):
+        runner = _basename(tokens[index])
         index += 1
-        # Skip interpreter options and their values (-u, -m module, NAME=value).
-        while index < len(tokens) and (
-            tokens[index].startswith("-") or "=" in tokens[index].split("/")[0]
-        ):
-            if tokens[index] in {"-m", "-c"}:
-                return None  # module or inline code: there is no script file
+        next_index = _skip_options(tokens, index)
+        if next_index is None:
+            return None  # module or inline code: there is no script file
+        index = next_index
+        if index < len(tokens) and tokens[index] in RUNNER_SUBCOMMANDS.get(runner, ()):
+            if runner in SCRIPT_NAME_RUNNERS and tokens[index] == "run":
+                return None  # a package.json script name, not a file
             index += 1
+            next_index = _skip_options(tokens, index)
+            if next_index is None:
+                return None
+            index = next_index
+        if runner in RUNNER_ARGUMENT_IS_PACKAGE:
+            return None
         if index < len(tokens) and _is_interpreter(tokens[index]):
             continue  # env python3 -> keep walking
         break
@@ -196,6 +240,11 @@ def _script_path(hook: HookEntry, cwd: Path | None = None) -> Path | None:
         return None
     candidate = tokens[index]
     if candidate.startswith("-"):
+        return None
+    if "/" not in candidate and not candidate.startswith("~"):
+        # A bare word is looked up on PATH (or inside the runner's environment),
+        # never in the working directory. There is no file here to judge; if it
+        # is missing, the execution probe sees exit 127 and says so itself.
         return None
     return Path(os.path.expanduser(candidate))
 
@@ -351,8 +400,9 @@ def check_startable(hook: HookEntry, cwd: Path) -> list[Finding]:
 # path from the command itself.
 LAUNCH_FAILURE_EXITS = frozenset({126, 127, 49})
 _MISSING_SCRIPT = re.compile(
-    r"(?:can't open file|cannot open file|No such file or directory)"
-    r"[^'\"]*['\"]?([^'\"\n]+)['\"]?",
+    r"(?:can't open file|cannot open file|No such file or directory|"
+    r"Cannot find module|Failed to spawn)"
+    r"[^'\"`]*['\"`]?([^'\"`\n]+)['\"`]?",
     re.IGNORECASE,
 )
 # "/bin/sh: ..." or "python3: ..." at the very start means the shell or the
@@ -363,6 +413,7 @@ _SHELL_COMPLAINT = re.compile(
 )
 _INTERPRETER_ERROR = re.compile(
     r"^(?:Traceback \(most recent call last\)|"
+    r"node:internal/modules/[a-z_/]+:\d+|"
     r"(?:ModuleNotFoundError|ImportError|SyntaxError|IndentationError):)",
     re.MULTILINE,
 )
@@ -544,32 +595,62 @@ def check_wrapped_commands(hook: HookEntry, cwd: Path) -> list[Finding]:
     return findings
 
 
+DECISION_KEYS = ("permissionDecision", "decision", "continue", "stopReason")
+
+
+def _verdict(result: RunResult) -> tuple[int | None, str]:
+    """What Claude Code would act on: the exit code and the decision fields.
+
+    Not the raw stdout. A Setup hook that quotes the session id and the working
+    directory into its additionalContext answers differently every time in
+    text and identically in effect; comparing bytes filed it as broken.
+    """
+    payload, _ = _decode_json(result.stdout)
+    decision: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        for key in DECISION_KEYS:
+            if key in payload:
+                decision[key] = payload[key]
+        nested = payload.get("hookSpecificOutput")
+        if isinstance(nested, dict):
+            for key in DECISION_KEYS:
+                if key in nested:
+                    decision[f"hookSpecificOutput.{key}"] = nested[key]
+    return result.exit_code, json.dumps(decision, sort_keys=True, default=str)
+
+
+def _describe(verdict: tuple[int | None, str]) -> str:
+    exit_code, decision = verdict
+    return f"exit {exit_code}" + (f" {decision}" if decision != "{}" else "")
+
+
 def check_determinism(hook: HookEntry, cwd: Path, limit: float, first: RunResult) -> list[Finding]:
     """Same payload, twice. A guard that answers differently is not a guard.
 
     This is what makes a stateful handler visible: we cannot reset someone's
-    counter or lock file, but we can notice that it exists.
+    counter or lock file, but we can notice that it exists. Only the verdict is
+    compared, and only where a verdict exists -- a hook that cannot block has
+    nothing to be inconsistent about.
     """
     findings: list[Finding] = []
-    if not first.started or first.timed_out:
+    if not first.started or first.timed_out or hook.event not in BLOCKING_EVENTS:
         return findings
-    seen = [(first.exit_code, first.stdout.strip())]
+    seen = [_verdict(first)]
     for _ in range(2):
         again = run_handler(
             hook, _camouflage(build_payload(hook, "neutral"), cwd), limit, cwd
         )
         if not again.started or again.timed_out:
             return findings
-        seen.append((again.exit_code, again.stdout.strip()))
+        seen.append(_verdict(again))
     if len(set(seen)) > 1:
-        codes = " then ".join(str(exit_code) for exit_code, _ in seen)
         findings.append(
             _finding(
                 "P11.NONDETERMINISTIC",
                 hook.name,
-                "Identical probes produced different answers.",
-                f"exit codes {codes}. A verdict that changes on its own cannot "
-                "be relied on for the run that matters.",
+                "Identical probes produced different verdicts.",
+                " then ".join(_describe(v) for v in seen)
+                + ". A verdict that changes on its own cannot be relied on for the run that matters.",
             )
         )
     return findings
@@ -586,7 +667,7 @@ def check_payload_sensitivity(
     the hook that behaves itself only while someone is watching.
     """
     findings: list[Finding] = []
-    if not first.started or first.timed_out:
+    if not first.started or first.timed_out or hook.event not in BLOCKING_EVENTS:
         return findings
     payload = build_payload(hook, "neutral")
     if not isinstance(payload, dict):
@@ -594,13 +675,14 @@ def check_payload_sensitivity(
     other = run_handler(hook, _decoy(payload), limit, cwd)
     if not other.started or other.timed_out:
         return findings
-    if other.exit_code != first.exit_code or other.stdout.strip() != first.stdout.strip():
+    before, after = _verdict(first), _verdict(other)
+    if before != after:
         findings.append(
             _finding(
                 "P11.PAYLOAD_SENSITIVE",
                 hook.name,
-                "The answer changed when only session id and cwd changed.",
-                f"exit {first.exit_code} vs {other.exit_code}.",
+                "The verdict changed when only session id and cwd changed.",
+                f"{_describe(before)} vs {_describe(after)}.",
             )
         )
     return findings
@@ -724,7 +806,7 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
             )
         return result
 
-    failure = launch_failed(neutral, str(hook.command or ""))
+    failure = launch_failed(neutral, _expanded_command(hook, cwd) or str(hook.command or ""))
     if failure is not None:
         # The process spawned, but the hook never ran: the gate is open.
         result.starts = False
@@ -739,6 +821,19 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
             )
         )
         return result
+
+    # The handler demonstrably ran. A static "file does not exist" was therefore
+    # a wrong guess about which token is the script; keeping it would contradict
+    # the table two lines further down. Measurement beats the guess.
+    guessed = _script_path(hook, cwd)
+    if guessed is not None:
+        resolved_guess = guessed if guessed.is_absolute() else cwd / guessed
+        if not resolved_guess.exists():
+            result.findings = [
+                f
+                for f in result.findings
+                if f.code not in {"P01.MISSING_FILE", "P01.RELATIVE_PATH", "P01.SPACE_IN_PATH"}
+            ]
 
     if neutral.timed_out:
         result.answers = False
@@ -893,7 +988,7 @@ def _probe_blocking(
             )
         )
         return False
-    deny_failure = launch_failed(deny, str(hook.command or ""))
+    deny_failure = launch_failed(deny, _expanded_command(hook, cwd) or str(hook.command or ""))
     if deny_failure is not None:
         result.findings.append(
             _finding(

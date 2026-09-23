@@ -130,6 +130,20 @@ def render_text(
                 out.append(f"      {finding.detail}")
         out.append("")
 
+    # Non-critical configuration findings used to vanish; one unreadable agent
+    # file per line would drown the table, so they are grouped by code.
+    soft_schema = [f for f in schema_findings if f.severity != "critical"]
+    if soft_schema:
+        by_code: dict[str, list[Finding]] = {}
+        for finding in soft_schema:
+            by_code.setdefault(finding.code, []).append(finding)
+        out.append("Configuration, worth a look (nothing here switches a hook off):")
+        for code, items in by_code.items():
+            entry = evidence.lookup(code)
+            sample = (items[0].detail or items[0].message).replace("\n", " ")[:100]
+            out.append(f"  {len(items)}x {entry.title} ({code}) -- e.g. {sample}")
+        out.append("")
+
     if not probes:
         out.append("No hook handlers found.")
         out.append(f"Looked at: {', '.join(s.label for s in config.sources) or 'nothing'}")

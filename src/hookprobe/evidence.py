@@ -615,6 +615,17 @@ EVIDENCE: dict[str, Evidence] = {
             "docs:matcher-patterns",
         ),
         _e(
+            "CONFIG.FRONTMATTER_UNPARSED",
+            "Agent frontmatter could not be read by hookprobe",
+            "warning",
+            "hookprobe's YAML reader is deliberately narrow. A file it cannot read is "
+            "not a hook that is off; it is a file whose hooks, if it declares any, were "
+            "not checked. Claude Code's own parser may well read it.",
+            "If the file declares hooks, verify them by hand or simplify the frontmatter; "
+            "otherwise nothing needs to change.",
+            "docs:subagent-frontmatter",
+        ),
+        _e(
             "CONFIG.BAD_GROUP",
             "Configuration hook group is invalid",
             "critical",

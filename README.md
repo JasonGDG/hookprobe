@@ -313,6 +313,37 @@ python tests/scenarios.py        # three whole configurations, end to end
 
 Every test mirrors a documented failure case; the fixtures are real files on disk, not mocks.
 
+### Against other people's setups
+
+The fixtures above were written by the same hands that wrote the checks. On 23.09.2026 the
+probe was pointed at three public repositories it had never seen, with the expected verdict
+written down first:
+
+| Repository | Expected | First run | After the fixes |
+|---|---|---|---|
+| disler/claude-code-hooks-mastery (3.9k stars, 13 hooks, all `uv run …`) | all healthy, PreToolUse can block | **13 of 13 "not protecting anything"** — `run` taken for the script | 13 start and answer, PreToolUse blocks, exit 0 |
+| parcadei/Continuous-Claude-v3 (3.9k stars, 36 hooks under `$HOME/.claude/hooks/dist`) | not installed here, so every file missing | right verdict, wrong reasons: `$HOME/…` called a relative path, 12 missing files told to "return exit code 2", 32 agent files listed as switching hooks off | 36 missing files, nothing else |
+| karanb192/claude-code-hooks (525 stars, plugin hooks via `--settings`) | two guards, both should run | both "unresolved placeholder" and "rejects with exit 1" | protect-secrets blocks; git-safety runs, but the Bash probe payload is not what it guards — reported as untested, not as broken |
+
+Six false alarms came out of that, each fixed and pinned by a test: runner subcommands
+(`uv run`, `deno run`, `pnpm run`), `$HOME` in a command, node's "Cannot find module" as a
+failed launch, the plugin root for a `hooks/hooks.json` given by path, flow-style lists in
+agent frontmatter, and determinism judged by stdout bytes instead of by verdict (a Setup hook
+that quotes the session id into its context is not nondeterministic).
+
+To repeat it, or to try a setup of your own:
+
+```sh
+git clone --depth 1 https://github.com/disler/claude-code-hooks-mastery
+cd claude-code-hooks-mastery
+env -i HOME="$HOME" PATH="$PATH" CLAUDE_PROJECT_DIR="$PWD" hookprobe . --no-home
+```
+
+`env -i` is deliberate: the default run executes the hooks with your environment, and some of
+these call a TTS API when they find a key. Write down the verdict you expect before you look at
+the one you get. The question is never whether the tool finds something; it is whether it finds
+the right thing and stays quiet otherwise.
+
 ### Three configurations, end to end
 
 Single fixtures test single judgements; `tests/scenarios.py` asks whether the report as a whole
