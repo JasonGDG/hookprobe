@@ -65,8 +65,62 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not ask before starting the --live stage",
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="apply the one repair that is always safe: restore missing execute bits",
+    )
+    watch = parser.add_argument_group("watching a running session")
+    watch.add_argument(
+        "--watch",
+        action="store_true",
+        help="report whether hooks are still firing while you work",
+    )
+    watch.add_argument(
+        "--install-heartbeat",
+        action="store_true",
+        help="add a non-blocking heartbeat handler so --watch has something to read",
+    )
+    watch.add_argument(
+        "--uninstall-heartbeat",
+        action="store_true",
+        help="remove the heartbeat handler again",
+    )
+    watch.add_argument(
+        "--follow",
+        action="store_true",
+        help="with --watch: keep printing when the verdict changes",
+    )
+    watch.add_argument(
+        "--window",
+        type=float,
+        default=900.0,
+        metavar="SECONDS",
+        help="how far back --watch looks (default: 900)",
+    )
     parser.add_argument("--version", action="version", version=f"hookprobe {__version__}")
     return parser
+
+
+def _apply_fixes(probes: list) -> list[str]:
+    """Restore execute bits. Nothing else -- rewriting someone's settings file
+    on their behalf is not a repair, it is a second opinion they did not ask
+    for."""
+    import stat as stat_module
+
+    from .probe import _script_path
+
+    done: list[str] = []
+    for probe in probes:
+        if not any(f.code == "P01.NOT_EXECUTABLE" for f in probe.findings):
+            continue
+        path = _script_path(probe.hook, Path.cwd())
+        if path is None or not path.exists():
+            continue
+        mode = path.stat().st_mode
+        path.chmod(mode | stat_module.S_IXUSR | stat_module.S_IRUSR)
+        done.append(str(path))
+    return done
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,6 +132,30 @@ def main(argv: list[str] | None = None) -> int:
     if not project_dir.is_dir():
         print(f"hookprobe: not a directory: {project_dir}", file=sys.stderr)
         return 2
+
+    from . import watch as watch_module
+
+    if args.install_heartbeat:
+        added = watch_module.install(project_dir)
+        if added:
+            print("Heartbeat installed for: " + ", ".join(added))
+        else:
+            print("Heartbeat was already installed.")
+        print(f"Settings: {project_dir / '.claude' / 'settings.local.json'}")
+        print("Remove it again with --uninstall-heartbeat.")
+        return 0
+
+    if args.uninstall_heartbeat:
+        removed = watch_module.uninstall(project_dir)
+        print("Heartbeat removed from: " + (", ".join(removed) or "nothing"))
+        return 0
+
+    if args.watch:
+        if args.follow:
+            return watch_module.follow(project_dir, window=args.window)
+        state = watch_module.status(project_dir, args.window)
+        sys.stdout.write(watch_module.render(state, args.window))
+        return 1 if state.alarm else 0
 
     settings = [Path(p).expanduser() for p in args.settings] if args.settings else None
     config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
@@ -132,6 +210,21 @@ def main(argv: list[str] | None = None) -> int:
             live_stage.apply(probes, result)
             channel_verdict = result.effective
         print(result.detail, file=sys.stderr)
+
+    if args.fix:
+        fixed = _apply_fixes(probes)
+        if fixed:
+            print("Restored the execute bit on:", file=sys.stderr)
+            for path in fixed:
+                print(f"  {path}", file=sys.stderr)
+            probes = []
+            for hook in config.hooks:
+                probe = probe_hook(hook, project_dir, timeout=args.timeout)
+                probe.findings.extend(check_matcher(hook))
+                probe.findings.extend(check_location(hook))
+                probes.append(probe)
+        else:
+            print("Nothing to fix automatically.", file=sys.stderr)
 
     if args.explain:
         sys.stdout.write(report_module.render_explain(args.explain, probes))

@@ -89,6 +89,7 @@ Python 3.11+, standard library only. No dependencies.
 | **Output cap** | above 10,000 characters the value is written to a file Claude is not asked to read | no |
 | **Timeout** | a hook waiting on stdin runs into its timeout — and a timed-out `PreToolUse` hook does **not** block | no |
 | **Placement** | hooks in agent frontmatter, `once: true` in skills, plugin sources | partly |
+| **Still firing** | hooks that stop mid-session, long after any one-off check | `--watch` |
 | **Effectiveness** | the hook fires, but its verdict does not change the call | **yes** (`--live`) |
 | **Channel** | whether a deny verdict is honoured in headless mode at all | **yes** (`--live`) |
 
@@ -153,6 +154,49 @@ The gap this fills is stated by an open issue in the tracker itself:
 
 > "Configured and effective are different properties, and only the first is observable today."
 > — [anthropics/claude-code#82323]
+
+## Watching a running session
+
+A probe proves the moment of the test. The failures it cannot see are the ones that happen
+later: hooks that stop firing mid-session ([#76322]), a log that grows until the handler dies
+([#16047]), a single `cd` that ends a watcher for the rest of the session ([#95440]).
+
+So turn the question around and let the hooks report in themselves:
+
+```sh
+hookprobe --install-heartbeat   # adds a non-blocking handler, marked and removable
+hookprobe --watch               # did anything call a hook while you worked?
+hookprobe --watch --follow      # keep printing when the verdict changes
+hookprobe --uninstall-heartbeat
+```
+
+```
+Heartbeat installed : yes
+Last hook report    : 22s ago
+Last session write  : 14s ago
+
+Events in the last 15 minutes:
+  PostToolUse       31
+  UserPromptSubmit   6
+  Stop               5
+
+Hooks reported in alongside session activity.
+```
+
+The alarm is one specific thing: **this project's session wrote to its transcript, but no hook
+reported in.** A quiet heartbeat during a quiet session means nothing and is not reported as a
+problem. The comparison is scoped to the project the heartbeat is installed in, so another busy
+project cannot raise a false alarm.
+
+## Repairing
+
+```sh
+hookprobe --fix
+```
+
+Restores missing execute bits — the one repair that is unambiguous. Nothing else is touched:
+rewriting someone's settings file on their behalf is not a repair, it is a second opinion they
+did not ask for. Everything else is reported with the exact command to run.
 
 ## Known limits of this version
 

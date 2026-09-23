@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -318,6 +319,61 @@ class ConfigurationFailureTests(ProjectTestCase):
         from hookprobe.cli import main
 
         self.assertEqual(main([str(self.project), "--no-home"]), 1)
+
+
+
+
+class WatchTests(ProjectTestCase):
+    """The heartbeat must be additive, removable, and must not raise a false
+    alarm just because another project is busy."""
+
+    def test_install_is_additive_and_uninstall_is_clean(self) -> None:
+        from hookprobe import watch
+
+        existing = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}}
+        local = self.project / ".claude" / "settings.local.json"
+        local.write_text(json.dumps(existing), "utf-8")
+
+        added = watch.install(self.project)
+        self.assertTrue(added)
+        self.assertTrue(watch.is_installed(self.project))
+        after = json.loads(local.read_text("utf-8"))
+        self.assertIn("PreToolUse", after["hooks"], "existing hooks must survive")
+
+        watch.uninstall(self.project)
+        self.assertFalse(watch.is_installed(self.project))
+        restored = json.loads(local.read_text("utf-8"))
+        self.assertIn("PreToolUse", restored["hooks"])
+
+    def test_install_is_idempotent(self) -> None:
+        from hookprobe import watch
+
+        watch.install(self.project)
+        self.assertEqual(watch.install(self.project), [])
+        watch.uninstall(self.project)
+
+    def test_quiet_project_is_not_an_alarm(self) -> None:
+        from hookprobe import watch
+
+        watch.install(self.project)
+        state = watch.status(self.project, window=900.0)
+        self.assertFalse(state.alarm, "no activity for this project means no verdict")
+        watch.uninstall(self.project)
+
+    def test_heartbeat_script_never_fails(self) -> None:
+        import subprocess
+
+        from hookprobe import watch
+
+        watch.install(self.project)
+        script = self.project / ".claude" / "hooks" / "hookprobe-heartbeat.py"
+        for payload in ("", "not json", '{"hook_event_name":"Stop"}'):
+            with self.subTest(payload=payload):
+                result = subprocess.run(
+                    [str(script)], input=payload, capture_output=True, text=True, timeout=10
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        watch.uninstall(self.project)
 
 
 if __name__ == "__main__":
