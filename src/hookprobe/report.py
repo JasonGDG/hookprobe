@@ -71,6 +71,20 @@ def _rejectable() -> frozenset[str]:
     return REJECTABLE_EVENTS
 
 
+def _accepted_probes(probes: list["HookProbe"], accepted: dict | None) -> dict[str, Any]:
+    """Broken probes whose every current problem the user accepted with --ask."""
+    if not accepted:
+        return {}
+    from .ask import is_accepted
+
+    found: dict[str, Any] = {}
+    for probe in probes:
+        entry = is_accepted(probe, accepted)
+        if entry is not None and probe.is_broken:
+            found[probe.name] = entry
+    return found
+
+
 def _sorted_findings(findings: Iterable[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 3), f.code))
 
@@ -81,17 +95,33 @@ def render_text(
     schema_findings: list[Finding],
     live_ran: bool = False,
     channel_verdict: bool | None = None,
+    accepted: dict | None = None,
 ) -> str:
     """The human-facing report."""
     from . import evidence
+    from .ask import disable_accepted
+
+    accepted_probes = _accepted_probes(probes, accepted)
+    disable_entry = disable_accepted(accepted) if config.disable_all_hooks else None
 
     out: list[str] = []
 
     if config.disable_all_hooks:
-        out.append("disableAllHooks is set -- no hook in this project runs at all.")
+        if disable_entry is not None:
+            out.append(
+                f"disableAllHooks is set -- accepted on {disable_entry.at}: "
+                f"{disable_entry.reason or 'no reason given'}"
+            )
+        else:
+            out.append("disableAllHooks is set -- no hook in this project runs at all.")
         out.append("")
 
-    critical_schema = [f for f in schema_findings if f.severity == "critical"]
+    critical_schema = [
+        f
+        for f in schema_findings
+        if f.severity == "critical"
+        and not (f.code == "P03.HOOKS_DISABLED" and disable_entry is not None)
+    ]
     if critical_schema:
         out.append("Configuration problems that switch hooks off:")
         for finding in _sorted_findings(critical_schema):
@@ -142,7 +172,8 @@ def render_text(
         )
         out.append("")
 
-    broken = [p for p in probes if p.is_broken]
+    broken = [p for p in probes if p.is_broken and p.name not in accepted_probes]
+    remaining = [p for p in probes if p.name not in accepted_probes]
     if broken:
         verb = "is" if len(broken) == 1 else "are"
         out.append(
@@ -166,15 +197,19 @@ def render_text(
     else:
         unverified = [
             probe
-            for probe in probes
+            for probe in remaining
             if any(f.code == "P01.NOT_TESTED" for f in probe.findings)
             or (probe.hook.event in _rejectable() and probe.can_block is None)
         ]
-        if unverified:
+        if not remaining:
+            out.append("Every hook here is off on purpose (see below).")
+        elif unverified:
             out.append(
-                f"{len(probes)} hooks start and answer; {len(unverified)} could not "
+                f"{len(remaining)} hooks start and answer; {len(unverified)} could not "
                 "be verified any further (see below)."
             )
+        elif accepted_probes:
+            out.append(f"All {len(remaining)} remaining hooks start and answer.")
         else:
             out.append(f"All {len(probes)} hooks start and answer.")
         out.append("")
@@ -190,6 +225,19 @@ def render_text(
         out.append("Worth a look:")
         for probe, finding in warnings:
             out.append(f"  {_short(probe.hook)}: {finding.message}")
+        out.append("")
+
+    if accepted_probes:
+        out.append("Off on purpose (accepted with --ask; delete the entry in "
+                   ".claude/hookprobe-accepted.json to be asked again):")
+        for probe in probes:
+            entry = accepted_probes.get(probe.name)
+            if entry is None:
+                continue
+            out.append(
+                f"  {_short(probe.hook)}: {', '.join(entry.codes)} -- "
+                f"{entry.reason or 'no reason given'} ({entry.at})"
+            )
         out.append("")
 
     if live_ran:
@@ -240,7 +288,9 @@ def render_json(
     probes: list[HookProbe],
     schema_findings: list[Finding],
     live_ran: bool = False,
+    accepted: dict | None = None,
 ) -> str:
+    accepted_probes = _accepted_probes(probes, accepted)
     payload: dict[str, Any] = {
         "version": 1,
         "project": str(config.project_dir),
@@ -266,12 +316,15 @@ def render_json(
                 "canBlock": probe.can_block,
                 "effective": getattr(probe, "effective", None),
                 "broken": probe.is_broken,
+                "acceptedAsOff": probe.name in accepted_probes,
                 "findings": [asdict(f) for f in probe.findings],
             }
         )
+    payload["accepted"] = [asdict(entry) for entry in (accepted or {}).values()]
     payload["summary"] = {
         "hooks": len(probes),
-        "broken": sum(1 for p in probes if p.is_broken),
+        "broken": sum(1 for p in probes if p.is_broken and p.name not in accepted_probes),
+        "acceptedAsOff": len(accepted_probes),
     }
     return json.dumps(payload, indent=2, ensure_ascii=False)
 

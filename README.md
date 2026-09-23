@@ -104,6 +104,37 @@ your programs, and they run with your environment in your project directory, exa
 Code would run them. If a hook writes files or calls out to the network, it will do that here
 too. Only `--live` spends two real sessions, and it asks first when run from a terminal.
 
+## Off on purpose
+
+A hook that is off is not always a defect. The execute bit may be missing while someone
+rewrites the script; `disableAllHooks` may be set on a demo machine. The default run cannot
+tell, so it reports and exits 1 every time. `--ask` is the opt-in middle ground:
+
+```sh
+hookprobe --ask
+```
+
+```
+[1/2] PreToolUse · deny-rm.py  (project (.claude/settings.json))
+  off because: The handler file is not executable.  [P01.NOT_EXECUTABLE]
+  fix would be: chmod +x .claude/hooks/deny-rm.py
+  Is this off on purpose?  [y]es, keep it   [n]o, fix it   [s]kip (Enter)  > y
+  Why? (one line, optional) > being rewritten this week
+  kept. It will be listed as off on purpose from now on.
+```
+
+*Yes* is remembered in `.claude/hookprobe-accepted.json` with the reason and the date. From
+then on the report lists that hook under *Off on purpose* instead of counting it as broken, and
+the exit code follows. The acceptance is tied to the event, the command and the exact problems
+accepted: a new problem on the same hook is asked about again, a changed command starts from
+zero. Delete the entry to be asked again.
+
+*No* applies the repair when there is a safe one — the execute bit, or `disableAllHooks` in a
+file hookprobe may write (never managed settings) — and otherwise prints the manual step.
+*Skip* changes nothing.
+
+`--ask` needs a terminal. Without one it stops with exit 2 rather than guessing.
+
 ## How `--live` works
 
 Effectiveness cannot be read from a single run — you cannot tell "the hook blocked it" from

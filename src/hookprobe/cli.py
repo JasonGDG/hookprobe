@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from . import ask as ask_module
 from .checks import check_location, check_matcher, check_schema
 from .config import load
 from .probe import probe_hook
@@ -69,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--fix",
         action="store_true",
         help="apply the one repair that is always safe: restore missing execute bits",
+    )
+    parser.add_argument(
+        "--ask",
+        action="store_true",
+        help=(
+            "walk through every hook that is off, say why, and ask whether that is "
+            "intended; accepted ones are listed as off on purpose instead of broken"
+        ),
     )
     watch = parser.add_argument_group("watching a running session")
     watch.add_argument(
@@ -142,6 +151,65 @@ def _apply_fixes(probes: list) -> list[str]:
     return done
 
 
+def _schema_findings(config) -> list:
+    schema_findings = check_schema(config)
+    # Load problems that check_schema does not map (broken JSON, unreadable
+    # file, unparsable frontmatter) must not vanish: a settings file that fails
+    # to parse means none of its hooks are active.
+    mapped = {finding.detail for finding in schema_findings}
+    for issue in list(config.issues) + list(config.sandbox_issues):
+        if issue.message in mapped or any(
+            issue.message == finding.message for finding in schema_findings
+        ):
+            continue
+        from .checks import Finding
+        from . import evidence as evidence_module
+
+        entry = evidence_module.lookup(issue.code)
+        severity = entry.severity if entry.title != "Uncatalogued finding" else "critical"
+        schema_findings.append(
+            Finding(
+                code=issue.code,
+                hook=None,
+                severity=severity,
+                message=f"{issue.source.label}: {issue.message}",
+                detail=issue.detail,
+            )
+        )
+    return schema_findings
+
+
+def _probe_all(config, project_dir: Path, timeout: float | None) -> list:
+    probes = []
+    for hook in config.hooks:
+        # One hook that explodes must not take the report with it -- a race
+        # between exists() and stat(), an unwritable temp directory. Report it
+        # as unverifiable and carry on.
+        try:
+            probe = probe_hook(hook, project_dir, timeout=timeout)
+        except Exception as error:  # noqa: BLE001 - deliberate boundary
+            from .checks import Finding
+            from .probe import HookProbe
+
+            probe = HookProbe(hook=hook)
+            probe.findings.append(
+                Finding(
+                    code="P01.NOT_TESTED",
+                    hook=hook.name,
+                    severity="warning",
+                    message="This hook could not be probed.",
+                    detail=f"{type(error).__name__}: {error}",
+                )
+            )
+        for extra in (check_matcher, check_location):
+            try:
+                probe.findings.extend(extra(hook))
+            except Exception:  # noqa: BLE001
+                pass
+        probes.append(probe)
+    return probes
+
+
 def main(argv: list[str] | None = None) -> int:
     from . import live as live_stage
     from . import report as report_module
@@ -208,60 +276,15 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(watch_module.render(state, args.window))
         return 1 if state.alarm else 0
 
+    if args.ask and not sys.stdin.isatty():
+        print("--ask asks questions, so it needs a terminal.", file=sys.stderr)
+        return 2
+
     settings = [Path(p).expanduser() for p in args.settings] if args.settings else None
     config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
 
-    schema_findings = check_schema(config)
-    # Load problems that check_schema does not map (broken JSON, unreadable
-    # file, unparsable frontmatter) must not vanish: a settings file that fails
-    # to parse means none of its hooks are active.
-    mapped = {finding.detail for finding in schema_findings}
-    for issue in list(config.issues) + list(config.sandbox_issues):
-        if issue.message in mapped or any(
-            issue.message == finding.message for finding in schema_findings
-        ):
-            continue
-        from .checks import Finding
-        from . import evidence as evidence_module
-
-        entry = evidence_module.lookup(issue.code)
-        severity = entry.severity if entry.title != "Uncatalogued finding" else "critical"
-        schema_findings.append(
-            Finding(
-                code=issue.code,
-                hook=None,
-                severity=severity,
-                message=f"{issue.source.label}: {issue.message}",
-                detail=issue.detail,
-            )
-        )
-    probes = []
-    for hook in config.hooks:
-        # One hook that explodes must not take the report with it -- a race
-        # between exists() and stat(), an unwritable temp directory. Report it
-        # as unverifiable and carry on.
-        try:
-            probe = probe_hook(hook, project_dir, timeout=args.timeout)
-        except Exception as error:  # noqa: BLE001 - deliberate boundary
-            from .checks import Finding
-            from .probe import HookProbe
-
-            probe = HookProbe(hook=hook)
-            probe.findings.append(
-                Finding(
-                    code="P01.NOT_TESTED",
-                    hook=hook.name,
-                    severity="warning",
-                    message="This hook could not be probed.",
-                    detail=f"{type(error).__name__}: {error}",
-                )
-            )
-        for extra in (check_matcher, check_location):
-            try:
-                probe.findings.extend(extra(hook))
-            except Exception:  # noqa: BLE001
-                pass
-        probes.append(probe)
+    schema_findings = _schema_findings(config)
+    probes = _probe_all(config, project_dir, args.timeout)
 
     live_ran = False
     channel_verdict: bool | None = None
@@ -289,36 +312,55 @@ def main(argv: list[str] | None = None) -> int:
             print("Restored the execute bit on:", file=sys.stderr)
             for path in fixed:
                 print(f"  {path}", file=sys.stderr)
-            probes = []
-            for hook in config.hooks:
-                probe = probe_hook(hook, project_dir, timeout=args.timeout)
-                probe.findings.extend(check_matcher(hook))
-                probe.findings.extend(check_location(hook))
-                probes.append(probe)
+            probes = _probe_all(config, project_dir, args.timeout)
         else:
             print("Nothing to fix automatically.", file=sys.stderr)
+
+    if args.ask:
+        outcome = ask_module.walk(project_dir, config, probes, input, print)
+        if outcome.fixed:
+            if outcome.settings_changed:
+                config = load(
+                    project_dir, explicit_settings=settings, include_home=not args.no_home
+                )
+                schema_findings = _schema_findings(config)
+            probes = _probe_all(config, project_dir, args.timeout)
+            print("Probed again after the fixes:")
+            print()
 
     if args.explain:
         sys.stdout.write(report_module.render_explain(args.explain, probes))
         return 1 if any(probe.is_broken for probe in probes) else 0
 
+    accepted = ask_module.load_accepted(project_dir)
     if args.json:
         sys.stdout.write(
-            report_module.render_json(config, probes, schema_findings, live_ran) + "\n"
+            report_module.render_json(config, probes, schema_findings, live_ran, accepted)
+            + "\n"
         )
     else:
         sys.stdout.write(
             report_module.render_text(
-                config, probes, schema_findings, live_ran, channel_verdict
+                config, probes, schema_findings, live_ran, channel_verdict, accepted
             )
         )
 
-    broken = any(probe.is_broken for probe in probes)
-    critical_config = any(f.severity == "critical" for f in schema_findings)
+    # What the user accepted with --ask is off on purpose, not broken.
+    broken = any(
+        probe.is_broken and ask_module.is_accepted(probe, accepted) is None
+        for probe in probes
+    )
+    disable_ok = ask_module.disable_accepted(accepted) is not None
+    critical_config = any(
+        f.severity == "critical"
+        and not (f.code == ask_module.DISABLE_CODE and disable_ok)
+        for f in schema_findings
+    )
+    disabled = config.disable_all_hooks and not disable_ok
     # A channel where a deny verdict is ignored makes every guard decoration,
     # so it has to reach the exit code the README promises.
     channel_dead = channel_verdict is False
-    return 1 if (broken or critical_config or config.disable_all_hooks or channel_dead) else 0
+    return 1 if (broken or critical_config or disabled or channel_dead) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover
