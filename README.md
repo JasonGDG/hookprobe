@@ -271,9 +271,19 @@ original registered too, and one PreToolUse hook fired twice for a single Bash c
 in-place version it fires once, exactly as without the recorder. `--record-remove` reads the
 original command back out of the wrapper, so an unrelated edit made in between is left alone.
 
-Three kinds of handler are named as *not recorded* rather than half-wrapped: managed settings
+Five kinds of handler are named as *not recorded* rather than half-wrapped: managed settings
 (enterprise policy), plugin hooks (their `${CLAUDE_PLUGIN_ROOT}` is only set when Claude Code
-calls them as plugin hooks) and agent frontmatter (markdown, not a settings file).
+calls them as plugin hooks), agent frontmatter (markdown, not a settings file), exec-form
+handlers with `args` (there is no shell line to replay) and handlers with a shell the recorder
+cannot run. A handler that says `"shell": "bash"` is replayed under bash, not `/bin/sh` — a
+bash-only guard run through `/bin/sh` blocks everything on macOS and nothing on dash, which is
+exactly the kind of change a recorder must not make. The handler does not see the recorder's
+own variables.
+
+Every file the recorder rewrites is listed in `.claude/hookprobe-record.json`, and
+`--record-remove` restores from that list, including a user-level file under `CLAUDE_CONFIG_DIR`.
+One caution the install prints: while recording, the shared `.claude/settings.json` points at
+a script on your machine. Do not commit it in that state.
 
 The closest existing tool, `clooks`, converts command hooks into HTTP hooks behind a daemon.
 This leaves the handlers, the settings shape and the failure modes as they were and only adds a

@@ -102,7 +102,7 @@ def render_text(
     from .ask import disable_accepted
 
     accepted_probes = _accepted_probes(probes, accepted)
-    disable_entry = disable_accepted(accepted) if config.disable_all_hooks else None
+    disable_entry = disable_accepted(accepted, config) if config.disable_all_hooks else None
 
     out: list[str] = []
 

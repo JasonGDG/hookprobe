@@ -130,7 +130,7 @@ def _settings_path_hint(project_dir: Path) -> Path:
     return project_dir / ".claude" / "settings.local.json"
 
 
-def _apply_fixes(probes: list) -> list[str]:
+def _apply_fixes(probes: list, project_dir: Path) -> list[str]:
     """Restore execute bits. Nothing else -- rewriting someone's settings file
     on their behalf is not a repair, it is a second opinion they did not ask
     for."""
@@ -142,8 +142,12 @@ def _apply_fixes(probes: list) -> list[str]:
     for probe in probes:
         if not any(f.code == "P01.NOT_EXECUTABLE" for f in probe.findings):
             continue
-        path = _script_path(probe.hook, Path.cwd())
-        if path is None or not path.exists():
+        path = _script_path(probe.hook, project_dir)
+        if path is None:
+            continue
+        if not path.is_absolute():
+            path = project_dir / path
+        if not path.exists():
             continue
         mode = path.stat().st_mode
         path.chmod(mode | stat_module.S_IXUSR | stat_module.S_IRUSR)
@@ -239,8 +243,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import record as record_module
 
+    settings = [Path(p).expanduser() for p in args.settings] if args.settings else None
+
     if args.record_install:
-        config = load(project_dir, include_home=not args.no_home)
+        config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
         result = record_module.wrap(project_dir, config.hooks)
         print(f"Recording {len(result.wrapped)} handlers:")
         for label in result.wrapped:
@@ -250,9 +256,12 @@ def main(argv: list[str] | None = None) -> int:
             for label, reason in result.skipped:
                 print(f"  {label} -- {reason}")
         if result.files:
-            print("\nChanged in place (restored by --record-remove):")
+            print("\nChanged in place (restored by --record-remove, listed in "
+                  f"{record_module._manifest_path(project_dir)}):")
             for path in result.files:
                 print(f"  {path}")
+        for warning in result.warnings:
+            print(f"\nCareful: {warning}")
         print("\nEach handler still runs exactly once: the recorder replaces the")
         print("original entry rather than adding a second one.")
         print("Work as usual, then: hookprobe --record")
@@ -265,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.record:
-        config = load(project_dir, include_home=not args.no_home)
+        config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
         sys.stdout.write(record_module.render(project_dir, config.hooks, args.window))
         return 0
 
@@ -280,7 +289,6 @@ def main(argv: list[str] | None = None) -> int:
         print("--ask asks questions, so it needs a terminal.", file=sys.stderr)
         return 2
 
-    settings = [Path(p).expanduser() for p in args.settings] if args.settings else None
     config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
 
     schema_findings = _schema_findings(config)
@@ -307,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         print(result.detail, file=sys.stderr)
 
     if args.fix:
-        fixed = _apply_fixes(probes)
+        fixed = _apply_fixes(probes, project_dir)
         if fixed:
             print("Restored the execute bit on:", file=sys.stderr)
             for path in fixed:
@@ -328,11 +336,19 @@ def main(argv: list[str] | None = None) -> int:
             print("Probed again after the fixes:")
             print()
 
+    accepted = ask_module.load_accepted(project_dir)
+
     if args.explain:
         sys.stdout.write(report_module.render_explain(args.explain, probes))
-        return 1 if any(probe.is_broken for probe in probes) else 0
+        return (
+            1
+            if any(
+                probe.is_broken and ask_module.is_accepted(probe, accepted) is None
+                for probe in probes
+            )
+            else 0
+        )
 
-    accepted = ask_module.load_accepted(project_dir)
     if args.json:
         sys.stdout.write(
             report_module.render_json(config, probes, schema_findings, live_ran, accepted)
@@ -350,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         probe.is_broken and ask_module.is_accepted(probe, accepted) is None
         for probe in probes
     )
-    disable_ok = ask_module.disable_accepted(accepted) is not None
+    disable_ok = ask_module.disable_accepted(accepted, config) is not None
     critical_config = any(
         f.severity == "critical"
         and not (f.code == ask_module.DISABLE_CODE and disable_ok)

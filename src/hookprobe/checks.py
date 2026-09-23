@@ -1015,12 +1015,18 @@ def _placeholder_values(hook: HookEntry, cwd: Path) -> dict[str, str | None]:
     }
 
 
+_PLACEHOLDER = re.compile(r"\$\{?(CLAUDE_[A-Z_]+)\}?")
+
+
 def _substitute_placeholders(text: str, values: dict[str, str | None]) -> str:
-    result = text
-    for name, value in values.items():
-        if value is not None:
-            result = result.replace("${" + name + "}", value)
-    return result
+    """Both spellings: `${CLAUDE_PROJECT_DIR}` and the documented
+    `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`. Unknown names stay as written."""
+
+    def replace(match: "re.Match[str]") -> str:
+        value = values.get(match.group(1))
+        return value if value is not None else match.group(0)
+
+    return _PLACEHOLDER.sub(replace, text)
 
 
 def _shell_argv(shell: Any, command: str) -> tuple[list[str] | None, str | None]:

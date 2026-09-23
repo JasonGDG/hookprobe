@@ -86,6 +86,13 @@ through a recorder.
 The stress suite and the scenario suite are run by hand, not in CI. There is no release on PyPI
 and the repository is private, so none of this is in anyone else's hands yet.
 
+A second code review (Codex, 23.09.2026, against ec5faa9) found fifteen problems in the recorder
+and `--ask` after the first review's fixes had landed; fourteen are fixed below, one is
+documented behaviour with a warning. Its verdict at the time -- "not yet trustworthy enough to
+run against a real project" -- was right, and the specific reasons are the fixed list's last
+entry. The recorder rewrites the shared project file while recording; that stays true, and the
+install now says so.
+
 ## Fixed since this list was written
 
 - The handler's configured `timeout` is now the probe's limit, so a handler Claude Code would
@@ -111,3 +118,18 @@ and the repository is private, so none of this is in anyone else's hands yet.
   (32 agents "switch hooks off"), and determinism judged by stdout bytes instead of verdict (a
   Setup hook quoting the session id was "nondeterministic"). Each is pinned by a test; the README
   section "Against other people's setups" has the table. [found 23.09.]
+- Fourteen findings of the second review (23.09.): the recorder replayed every handler through
+  `/bin/sh` and kept `args`, so a `"shell": "bash"` guard blocked everything or nothing (now
+  replayed under bash; exec-form handlers named, not wrapped); `--record-remove` hard-coded
+  `~/.claude` and ignored `CLAUDE_CONFIG_DIR`, leaving a user-level hook pointing at a deleted
+  recorder in every project (a manifest of touched files now drives the restore); the documented
+  unbraced `"$CLAUDE_PROJECT_DIR"/...` form was never substituted and came back "missing";
+  `--record` keyed calls by `event:basename(last token)` so distinct handlers collided (a per-file
+  key now, basename for display only); installing over an older appended wrapper brought the
+  double run back (legacy entries are cleared first); the acceptance key ignored file and matcher;
+  `--fix` and the `--ask` repair resolved relative paths against the process cwd; the recorder
+  shebang assumed `python3` on Claude's PATH (the installing interpreter is used); the handler
+  could see `HOOKPROBE_*` in its environment; `--explain` ignored acceptances; a malformed managed
+  command crashed the install; marker recognition was substring-based; a timed-out recorder left
+  the handler running. Each has a test that executes the generated wrapper line through `/bin/sh`
+  or the CLI from a foreign directory. [found 23.09.]

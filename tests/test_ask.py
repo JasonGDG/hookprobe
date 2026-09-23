@@ -178,6 +178,48 @@ class AskTests(ProjectTestCase):
             sys.stdin = previous
         self.assertEqual(code, 2)
 
+    def test_same_command_in_two_files_needs_two_answers(self) -> None:
+        path = self.write_hook("deny.py", DENY_EXIT_2, executable=False)
+        self.simple_settings("PreToolUse", str(path))
+        local = self.project / ".claude" / "settings.local.json"
+        local.write_text(
+            json.dumps({"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": str(path)}]}]}}),
+            "utf-8",
+        )
+
+        outcome, _ = self._walk("y", "only the Bash one is on purpose", "s")
+
+        self.assertEqual((len(outcome.accepted), len(outcome.skipped)), (1, 1))
+        self.assertEqual(self._main()[0], 1, "the skipped one must still count")
+
+    def test_fix_from_a_foreign_cwd_uses_the_project_dir(self) -> None:
+        import os
+        import tempfile
+
+        from hookprobe.cli import main
+
+        path = self.write_hook("guard.sh", "#!/bin/sh\ncat >/dev/null\nexit 0\n", executable=False)
+        self.simple_settings("PreToolUse", ".claude/hooks/guard.sh")
+        elsewhere = tempfile.mkdtemp(prefix="hookprobe-elsewhere-")
+        previous = os.getcwd()
+        os.chdir(elsewhere)
+        self.addCleanup(os.chdir, previous)
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            main([str(self.project), "--no-home", "--fix"])
+
+        self.assertTrue(path.stat().st_mode & 0o100, "the project's file must get the bit")
+
+    def test_explain_honours_the_acceptance(self) -> None:
+        path = self.write_hook("deny.py", DENY_EXIT_2, executable=False)
+        self.simple_settings("PreToolUse", str(path))
+        self._walk("y", "known")
+
+        code, text = self._main("--explain", "deny")
+
+        self.assertEqual(code, 0)
+        self.assertIn("deny.py", text)
+
     def test_json_output_carries_the_acceptance(self) -> None:
         path = self.write_hook("deny.py", DENY_EXIT_2, executable=False)
         self.simple_settings("PreToolUse", str(path))

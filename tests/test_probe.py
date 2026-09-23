@@ -467,6 +467,7 @@ class RecorderTests(ProjectTestCase):
         record.unwrap(self.project)
         self.assertFalse(record.is_wrapped(self.project))
         self.assertIn("Stop", json.loads(local.read_text("utf-8"))["hooks"])
+        self.assertFalse((self.project / ".claude" / "hookprobe-record.json").exists())
         self.assertFalse(
             (self.project / ".claude" / "hooks" / "hookprobe-recorder.py").exists()
         )
@@ -529,6 +530,184 @@ class RecorderTests(ProjectTestCase):
             [str(path)],
             "a legacy entry must be deleted, not turned into a duplicate handler",
         )
+
+    def _wrapper_of(self, event: str = "PreToolUse") -> str:
+        settings = json.loads((self.project / ".claude" / "settings.json").read_text("utf-8"))
+        return settings["hooks"][event][0]["hooks"][0]["command"]
+
+    def _through_sh(self, wrapper: str, payload: str, env: dict | None = None):
+        return self._run(["/bin/sh", "-c", wrapper], payload, env)
+
+    def test_generated_wrapper_line_is_transparent_through_sh(self) -> None:
+        """The earlier transparency test called the recorder script directly. This
+        one runs the exact command line that lands in the settings file, the way
+        Claude Code runs it, for a quoted path with spaces and a blocking payload."""
+        from hookprobe import record
+
+        (self.project / ".claude" / "my hooks").mkdir()
+        path = self.project / ".claude" / "my hooks" / "guard.py"
+        path.write_text(self.GUARD, "utf-8")
+        path.chmod(0o755)
+        self.simple_settings("PreToolUse", f'"{path}"')
+        record.wrap(self.project, self.load().hooks)
+        wrapper = self._wrapper_of()
+
+        for payload in (
+            '{"tool_name":"Bash","tool_input":{"command":"ls"}}',
+            '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}',
+        ):
+            with self.subTest(payload=payload):
+                direct = self._run(["/bin/sh", "-c", f'"{path}"'], payload)
+                through = self._through_sh(wrapper, payload)
+                self.assertEqual(direct.returncode, through.returncode)
+                self.assertEqual(direct.stdout, through.stdout)
+                self.assertEqual(direct.stderr, through.stderr)
+
+    def test_unwrap_restores_the_exact_command_text(self) -> None:
+        from hookprobe import record
+
+        original = "sh -c 'echo \"it'\"'\"'s fine\" ; exit 0'"
+        self.simple_settings("PreToolUse", original)
+        record.wrap(self.project, self.load().hooks)
+        self.assertNotEqual(self._wrapper_of(), original)
+        record.unwrap(self.project)
+        self.assertEqual(self._wrapper_of(), original)
+
+    def test_bash_shell_handler_keeps_its_shell(self) -> None:
+        """A bash-only guard run through /bin/sh blocks everything on macOS (syntax
+        error -> exit 2) and nothing on dash. The recorder must keep bash."""
+        from hookprobe import record
+
+        handler = {
+            "type": "command",
+            "command": "if grep -q rm <(cat); then exit 2; fi; exit 0",
+            "shell": "bash",
+        }
+        self.write_settings({"PreToolUse": [{"matcher": "Bash", "hooks": [handler]}]})
+        record.wrap(self.project, self.load().hooks)
+        wrapper = self._wrapper_of()
+
+        self.assertIn("HOOKPROBE_SHELL=bash", wrapper)
+        benign = self._through_sh(wrapper, '{"tool_input":{"command":"ls"}}')
+        blocked = self._through_sh(wrapper, '{"tool_input":{"command":"rm -rf /"}}')
+        self.assertEqual((benign.returncode, blocked.returncode), (0, 2))
+
+    def test_exec_form_handler_is_named_not_wrapped(self) -> None:
+        from hookprobe import record
+
+        handler = {"type": "command", "command": "/usr/bin/printf", "args": ["OK"]}
+        self.write_settings({"PreToolUse": [{"matcher": "Bash", "hooks": [handler]}]})
+        result = record.wrap(self.project, self.load().hooks)
+
+        self.assertEqual(result.wrapped, [])
+        self.assertIn("args", result.skipped[0][1])
+        self.assertEqual(self._wrapper_of(), "/usr/bin/printf")
+
+    def test_recorder_hides_itself_from_the_handler(self) -> None:
+        from hookprobe import record
+
+        body = (
+            "#!/bin/sh\n"
+            "cat > /dev/null\n"
+            'if [ -n "$HOOKPROBE_LABEL" ]; then exit 2; fi\n'
+            "exit 0\n"
+        )
+        path = self.write_hook("spy.sh", body)
+        self.simple_settings("PreToolUse", str(path))
+        record.wrap(self.project, self.load().hooks)
+
+        self.assertEqual(self._through_sh(self._wrapper_of(), "{}").returncode, 0)
+
+    def test_install_over_a_legacy_entry_does_not_double_the_handler(self) -> None:
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        local = self.project / ".claude" / "settings.local.json"
+        legacy = (
+            "HOOKPROBE_LABEL=PreToolUse:guard.py HOOKPROBE_EVENT=PreToolUse "
+            f"HOOKPROBE_ORIGINAL={path} {self.project}/.claude/hooks/hookprobe-recorder.py"
+        )
+        local.write_text(
+            json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": legacy}]}]}}),
+            "utf-8",
+        )
+
+        record.wrap(self.project, self.load().hooks)
+
+        commands = [h.command for h in self.load().hooks if h.event == "PreToolUse"]
+        self.assertEqual(len(commands), 1, "exactly one handler must remain")
+        self.assertEqual(record.original_of(commands[0]), str(path))
+
+    def test_user_level_file_is_restored_through_the_manifest(self) -> None:
+        """`--record-remove` used to hard-code ~/.claude; with CLAUDE_CONFIG_DIR set
+        it restored the project file and left the user-level hook pointing at a
+        recorder it had just deleted -- in every project on the machine."""
+        import os
+        import tempfile
+
+        from hookprobe import record
+        from hookprobe.config import load
+
+        config_dir = Path(tempfile.mkdtemp(prefix="hookprobe-cfg-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(config_dir, ignore_errors=True))
+        previous = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        self.addCleanup(
+            lambda: os.environ.__setitem__("CLAUDE_CONFIG_DIR", previous)
+            if previous is not None
+            else os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        )
+        user_hook = self.write_hook("user.sh", "#!/bin/sh\ncat >/dev/null\nexit 0\n")
+        (config_dir / "settings.json").write_text(
+            json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": str(user_hook)}]}]}}),
+            "utf-8",
+        )
+        project_hook = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(project_hook))
+
+        result = record.wrap(self.project, load(self.project, include_home=True).hooks)
+        self.assertEqual(len(result.wrapped), 2)
+        self.assertIn(config_dir / "settings.json", result.files)
+
+        restored = record.unwrap(self.project)
+
+        self.assertEqual(restored, 2)
+        user_settings = json.loads((config_dir / "settings.json").read_text("utf-8"))
+        self.assertEqual(user_settings["hooks"]["Stop"][0]["hooks"][0]["command"], str(user_hook))
+        self.assertFalse(record.is_wrapped(self.project))
+
+    def test_same_basename_in_two_files_gets_two_keys(self) -> None:
+        from hookprobe import record
+
+        (self.project / "a").mkdir()
+        (self.project / "b").mkdir()
+        first = self.project / "a" / "guard.sh"
+        second = self.project / "b" / "guard.sh"
+        for path in (first, second):
+            path.write_text("#!/bin/sh\ncat >/dev/null\nexit 0\n", "utf-8")
+            path.chmod(0o755)
+        self.write_settings(
+            {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": str(first)}]},
+                    {"matcher": "Write", "hooks": [{"type": "command", "command": str(second)}]},
+                ]
+            }
+        )
+        record.wrap(self.project, self.load().hooks)
+        fields = [record.wrapper_fields(h.command) for h in self.load().hooks]
+
+        self.assertEqual(fields[0]["label"], fields[1]["label"])
+        self.assertNotEqual(fields[0]["key"], fields[1]["key"])
+
+    def test_label_names_the_script_not_the_last_token(self) -> None:
+        from hookprobe import record
+
+        self.assertEqual(record.label_for("PreToolUse", "python3 guard.py --strict"), "PreToolUse:guard.py")
+        self.assertEqual(record.label_for("PreToolUse", "foo.py 2>/dev/null"), "PreToolUse:foo.py")
+        self.assertEqual(record.label_for("PreToolUse", "uv run /x/hooks/pre.py"), "PreToolUse:pre.py")
+        self.assertEqual(record.label_for("Stop", "echo 'oops"), "Stop:echo")
 
     def test_plugin_hooks_are_named_rather_than_half_wrapped(self) -> None:
         """${CLAUDE_PLUGIN_ROOT} is only set when Claude Code calls a plugin hook,
@@ -593,6 +772,21 @@ class ForeignSetupTests(ProjectTestCase):
         ):
             with self.subTest(command=command):
                 self.assertIsNone(_script_path(self._hook(command), self.project))
+
+    def test_unbraced_project_dir_placeholder_is_the_documented_form(self) -> None:
+        # Claude Code's docs write "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh; only the
+        # braced spelling was substituted, so the documented form was "missing".
+        import os
+
+        previous = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        if previous is not None:
+            self.addCleanup(os.environ.__setitem__, "CLAUDE_PROJECT_DIR", previous)
+        self.write_hook("guard.py", DENY_EXIT_2)
+        self.simple_settings("PreToolUse", '"$CLAUDE_PROJECT_DIR"/.claude/hooks/guard.py')
+        _, probes = self.probe_all()
+        self.assertFalse(probes[0].is_broken)
+        self.assertNotIn("P01.MISSING_FILE", codes(probes[0]))
+        self.assertTrue(probes[0].can_block)
 
     def test_home_variable_is_expanded_as_the_shell_would(self) -> None:
         from hookprobe.probe import _script_path

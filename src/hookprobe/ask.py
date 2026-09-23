@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -64,8 +65,23 @@ def accepted_path(project_dir: Path) -> Path:
     return project_dir / ".claude" / ACCEPTED_NAME
 
 
-def key_for(event: str, command: str) -> str:
-    return hashlib.sha256(f"{event}\0{command}".encode("utf-8")).hexdigest()[:16]
+def key_for(hook) -> str:
+    """One acceptance per handler: the file it lives in, event, matcher, command.
+
+    Two hooks with the same command in different files or behind different
+    matchers are different guards; accepting one must not accept the other.
+    """
+    # realpath, or /var/... and /private/var/... would be two different guards.
+    where = os.path.realpath(hook.source.path)
+    raw = f"{where}\0{hook.event}\0{hook.matcher}\0{hook.command}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def disable_key(config) -> str:
+    """disableAllHooks, keyed by the files that set it, so a second file that
+    later switches everything off is asked about again."""
+    files = sorted(os.path.realpath(s.path) for s in config.sources if _sets_disable(s.path))
+    return hashlib.sha256(("disableAllHooks\0" + "\0".join(files)).encode("utf-8")).hexdigest()[:16]
 
 
 def load_accepted(project_dir: Path) -> dict[str, Accepted]:
@@ -127,7 +143,7 @@ def is_accepted(probe, entries: dict[str, Accepted] | None) -> Accepted | None:
     """The acceptance covering this probe, or None if anything new turned up."""
     if not entries:
         return None
-    entry = entries.get(key_for(probe.hook.event, str(probe.hook.command)))
+    entry = entries.get(key_for(probe.hook))
     if entry is None:
         return None
     if not set(signature(probe)) <= set(entry.codes):
@@ -135,10 +151,10 @@ def is_accepted(probe, entries: dict[str, Accepted] | None) -> Accepted | None:
     return entry
 
 
-def disable_accepted(entries: dict[str, Accepted] | None) -> Accepted | None:
+def disable_accepted(entries: dict[str, Accepted] | None, config) -> Accepted | None:
     if not entries:
         return None
-    return entries.get(key_for("*", DISABLE_KEY))
+    return entries.get(disable_key(config))
 
 
 # --- the two repairs that are safe to apply ---------------------------------
@@ -148,7 +164,11 @@ def fix_execute_bit(probe, project_dir: Path) -> Path | None:
     from .probe import _script_path
 
     path = _script_path(probe.hook, project_dir)
-    if path is None or not path.exists():
+    if path is None:
+        return None
+    if not path.is_absolute():
+        path = project_dir / path  # the selected project, not the process cwd
+    if not path.exists():
         return None
     mode = path.stat().st_mode
     path.chmod(mode | stat.S_IXUSR | stat.S_IRUSR)
@@ -199,7 +219,7 @@ def _items(project_dir: Path, config, probes, entries) -> list[_Item]:
 
     items: list[_Item] = []
 
-    if config.disable_all_hooks and disable_accepted(entries) is None:
+    if config.disable_all_hooks and disable_accepted(entries, config) is None:
         entry = evidence.lookup(DISABLE_CODE)
         where = [s.label for s in config.sources if _sets_disable(s.path)]
         items.append(
@@ -209,7 +229,7 @@ def _items(project_dir: Path, config, probes, entries) -> list[_Item]:
                     f"  off because: {entry.title}  [{DISABLE_CODE}]",
                     f"      set in: {', '.join(where) or 'a file hookprobe could not read'}",
                 ],
-                key=key_for("*", DISABLE_KEY),
+                key=disable_key(config),
                 hook_name="disableAllHooks",
                 event="*",
                 command=DISABLE_KEY,
@@ -250,7 +270,7 @@ def _items(project_dir: Path, config, probes, entries) -> list[_Item]:
             _Item(
                 title=f"{probe.hook.event} · {_short(probe.hook)}  ({probe.hook.source.label})",
                 lines=lines,
-                key=key_for(probe.hook.event, str(probe.hook.command)),
+                key=key_for(probe.hook),
                 hook_name=probe.hook.name,
                 event=probe.hook.event,
                 command=str(probe.hook.command),
