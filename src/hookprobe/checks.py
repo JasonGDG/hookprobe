@@ -971,6 +971,85 @@ class RunResult:
     timed_out: bool
     spawn_error: str | None
     argv: list[str] | str
+    flooded: bool = False
+
+
+STREAM_CAP = 1_000_000  # characters per stream; a handler that writes more is ended
+
+
+def _kill(process: "subprocess.Popen[str]") -> None:
+    try:
+        if sys.platform == "win32":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _bounded_communicate(
+    process: "subprocess.Popen[str]", stdin_text: str, timeout: float
+) -> tuple[str, str, bool, bool]:
+    """communicate() with a ceiling. Returns (stdout, stderr, timed_out, flooded).
+
+    communicate() buffers everything a handler writes; a hook looping on `yes`
+    took 5.27 GB of memory before the probe timeout could bite. Each stream is
+    read up to STREAM_CAP and the process is ended when either exceeds it.
+    """
+    import threading
+
+    chunks: dict[str, list[str]] = {"out": [], "err": []}
+    seen = {"out": 0, "err": 0}
+    flooded = threading.Event()
+
+    def feed() -> None:
+        try:
+            if process.stdin is not None:
+                process.stdin.write(stdin_text)
+                process.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def drain(name: str, stream: Any) -> None:
+        if stream is None:
+            return
+        try:
+            while True:
+                piece = stream.read(65536)
+                if not piece:
+                    break
+                if seen[name] < STREAM_CAP:
+                    chunks[name].append(piece[: STREAM_CAP - seen[name]])
+                seen[name] += len(piece)
+                if seen[name] > STREAM_CAP and not flooded.is_set():
+                    flooded.set()
+                    _kill(process)
+        except (OSError, ValueError):
+            pass
+
+    threads = [
+        threading.Thread(target=feed, daemon=True),
+        threading.Thread(target=drain, args=("out", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("err", process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill(process)
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+    for thread in threads:
+        thread.join(timeout=1.0)
+    return "".join(chunks["out"]), "".join(chunks["err"]), timed_out, flooded.is_set()
 
 
 _ACTIVE_PROJECT_DIR: Path | None = None
@@ -1129,43 +1208,20 @@ def run_handler(
 
         process = subprocess.Popen(argv, **popen_options)
         stdin_text = json.dumps(payload, separators=(",", ":")) if stdin_mode == "payload" else ""
-        try:
-            stdout, stderr = process.communicate(input=stdin_text, timeout=float(timeout))
-            return RunResult(
-                True,
-                process.returncode,
-                stdout,
-                stderr,
-                time.monotonic() - started_at,
-                False,
-                None,
-                argv,
-            )
-        except subprocess.TimeoutExpired:
-            try:
-                if sys.platform == "win32":
-                    process.kill()
-                else:
-                    os.killpg(process.pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-            try:
-                stdout, stderr = process.communicate(timeout=1.0)
-            except Exception:
-                stdout, stderr = "", ""
-            return RunResult(
-                True,
-                process.returncode,
-                stdout,
-                stderr,
-                time.monotonic() - started_at,
-                True,
-                None,
-                argv,
-            )
+        stdout, stderr, timed_out, flooded = _bounded_communicate(
+            process, stdin_text, float(timeout)
+        )
+        return RunResult(
+            True,
+            process.returncode,
+            stdout,
+            stderr,
+            time.monotonic() - started_at,
+            timed_out,
+            None,
+            argv,
+            flooded,
+        )
     except Exception as error:
         if process is not None and process.poll() is None:
             try:

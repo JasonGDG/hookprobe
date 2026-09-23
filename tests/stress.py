@@ -64,6 +64,7 @@ class Case:
     wants: tuple[str, ...] = ()
     forbids: tuple[str, ...] = ()
     note: str = ""
+    requires: tuple[str, ...] = ()  # tools on PATH this case needs; skipped otherwise
 
 
 def py(body: str) -> str:
@@ -117,6 +118,7 @@ CASES: list[Case] = [
         "healthy",
         files={"g.py": PY_DENY},
         command="uv run {g.py}",
+        requires=("uv",),
         starts=True, can_block=True, broken=False,
         forbids=("P01.MISSING_FILE", "P01.RELATIVE_PATH"),
         note="`run` is a subcommand, not the script; 23.09. this read as 'file does not exist'",
@@ -125,6 +127,7 @@ CASES: list[Case] = [
         "node cannot find the module: a failed launch, not a wrong exit code",
         "broken",
         command="node /nonexistent/hookprobe-stress/gone.mjs",
+        requires=("node",),
         starts=False, broken=True,
         wants=("P01.MISSING_FILE",),
         forbids=("P08.EXIT_ONE_ON_REJECT",),
@@ -675,8 +678,13 @@ def main() -> int:
 
     root = Path(tempfile.mkdtemp(prefix="guardfixtures-"))  # must not contain the tool name
     results: list[tuple[Case, bool, list[str]]] = []
+    skipped: list[tuple[Case, str]] = []
     try:
         for case in CASES:
+            missing = [tool for tool in case.requires if shutil.which(tool) is None]
+            if missing:
+                skipped.append((case, ", ".join(missing)))
+                continue
             project = build(case, root)
             ok, problems = evaluate(case, project)
             results.append((case, ok, problems))
@@ -686,6 +694,8 @@ def main() -> int:
             marker.unlink()
 
     width = max(len(case.name) for case in CASES)
+    for case, tools in skipped:
+        print(f"  skip  {case.name.ljust(width)}  ({tools} not installed)")
     for group in ("healthy", "broken", "adversarial"):
         rows = [row for row in results if row[0].group == group]
         passed = sum(1 for _, ok, _ in rows if ok)

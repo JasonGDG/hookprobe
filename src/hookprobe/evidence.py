@@ -590,6 +590,17 @@ EVIDENCE: dict[str, Evidence] = {
             "docs:configuration",
         ),
         _e(
+            "P07.OUTPUT_FLOOD",
+            "Handler floods its output",
+            "warning",
+            "The handler wrote more than 1 MB to one stream. hookprobe reads up to that much "
+            "and ends the process, because buffering it all once cost 5 GB of memory. "
+            "Claude Code truncates far earlier, so nothing past the first kilobytes "
+            "reaches the model anyway.",
+            "Log to a file instead of stdout; keep stdout for the decision.",
+            "docs:output-cap",
+        ),
+        _e(
             "CONFIG.FRONTMATTER_UNPARSED",
             "Hook frontmatter could not be parsed",
             "critical",

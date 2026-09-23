@@ -1,5 +1,21 @@
 # hookprobe
 
+> **Status: demo.** hookprobe is a working demonstration of one claim — that *configured* and
+> *effective* are two different properties of a Claude Code hook, and that the gap between them
+> can be measured from outside. It runs, it is tested (68 unit tests, 49 stress fixtures with
+> the expected verdict written down first, three whole-configuration scenarios, and three public
+> hook setups it had never seen), and it keeps a public list of what it gets wrong in
+> [KNOWN-ISSUES.md](KNOWN-ISSUES.md). It is not on PyPI, it is POSIX-only (macOS, Linux), and the
+> interface may still change. Install straight from git:
+>
+> ```sh
+> uvx --from git+https://github.com/JasonGDG/hookprobe hookprobe --no-home
+> ```
+>
+> The default run executes your hooks with your environment. `--static-only` does not run
+> anything and reports only what can be read from disk — use it first on a project you do not
+> trust.
+
 **Your protective hooks all show green. Two of them stopped checking weeks ago.**
 
 Claude Code hooks are the place where permissions are actually enforced — a language model
@@ -71,7 +87,7 @@ hookprobe --no-home && claude
 ## Install
 
 ```sh
-uvx hookprobe            # no installation
+uvx --from git+https://github.com/JasonGDG/hookprobe hookprobe            # no installation
 pipx install hookprobe   # or keep it around
 ```
 
@@ -103,6 +119,9 @@ for the determinism check, one decoy, one rejection probe), each with a payload 
 your programs, and they run with your environment in your project directory, exactly as Claude
 Code would run them. If a hook writes files or calls out to the network, it will do that here
 too. Only `--live` spends two real sessions, and it asks first when run from a terminal.
+`--static-only` runs nothing at all and reports only what can be read from disk. Output per
+handler and stream is capped at 1 MB; a handler that writes more is ended and reported, because
+buffering it all once cost 5 GB of memory.
 
 ## Off on purpose
 

@@ -22,23 +22,13 @@ inherits the full environment via `os.environ.copy()`. The consent prompt sits b
 question. The README discloses the terminal-only wording; the unrestricted tool grant it does
 not mention.
 
-## Honesty of the tool's own description
-
-**The default run is not isolated.** [K7]
-Hooks run with `os.environ.copy()` in the real project directory: a handler can read the
-environment, write into the project and reach the network. The README states this plainly now,
-including that each handler is executed five times, but there is still no `--static-only` and no
-confirmation before someone else's code is run.
-
-**`Operating System :: OS Independent` is not true.** [W14]
-POSIX execute bits, `/bin/sh`, Unix shebangs, process groups. The suite does not run on Windows,
-and one test depends on CPython's English wording for a missing file.
-
 ## Missing limits and unfinished checks
 
-**No limit on hook output.** [K8]
-`communicate()` buffers everything. The reviewer measured 5.27 GB resident and 96 seconds against
-a handler writing `yes` in a loop; the probe timeout bounds the first read, not the drain.
+**The default run is not isolated.** [K7, what remains]
+Hooks run with `os.environ.copy()` in the real project directory: a handler can read the
+environment, write into the project and reach the network. `--static-only` now exists and the
+run says on stderr that it is about to execute handlers, but there is no sandbox and no
+per-handler consent. Use `env -i` and `--static-only` on anything you do not trust.
 
 **The stdin heuristic is inverted and weak.** [W4]
 `P10.STDIN_BLOCK` is emitted when the handler does *not* appear to read stdin, and the markers
@@ -83,8 +73,8 @@ through a recorder.
 
 ## Process
 
-The stress suite and the scenario suite are run by hand, not in CI. There is no release on PyPI
-and the repository is private, so none of this is in anyone else's hands yet.
+There is no release on PyPI and the repository is private, so none of this is in anyone else's
+hands yet. The three suites run in CI since 23.09.
 
 A second code review (Codex, 23.09.2026, against ec5faa9) found fifteen problems in the recorder
 and `--ask` after the first review's fixes had landed; fourteen are fixed below, one is
@@ -133,3 +123,9 @@ install now says so.
   command crashed the install; marker recognition was substring-based; a timed-out recorder left
   the handler running. Each has a test that executes the generated wrapper line through `/bin/sh`
   or the CLI from a foreign directory. [found 23.09.]
+- Hook output is capped at 1 MB per stream; a handler that writes more is ended and reported
+  as `P07.OUTPUT_FLOOD` instead of taking 5 GB of memory. [K8]
+- `--static-only` reads the configuration and runs nothing; the default run announces on
+  stderr that it is about to execute handlers. [K7 in part]
+- The package no longer claims `OS Independent`; it is POSIX (macOS, Linux). [W14]
+- The three suites run in GitHub Actions on Ubuntu and macOS, Python 3.11 and 3.13.

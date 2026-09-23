@@ -913,5 +913,63 @@ class ForeignSetupTests(ProjectTestCase):
         self.assertIn("CONFIG.FRONTMATTER_UNPARSED", text)
 
 
+class SafetyTests(ProjectTestCase):
+    """Two things a tool that runs other people's programs has to have before
+    anyone else runs it: a ceiling on what a handler can do to the machine, and
+    a way to look without running anything."""
+
+    def test_output_flood_is_capped_and_reported(self) -> None:
+        import time as clock
+
+        body = (
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stdin.read()\n"
+            "line = 'y' * 1000 + '\\n'\n"
+            "while True:\n"
+            "    sys.stdout.write(line)\n"
+        )
+        path = self.write_hook("flood.py", body)
+        self.simple_settings("PostToolUse", str(path))
+        started = clock.monotonic()
+        _, probes = self.probe_all()
+
+        self.assertLess(clock.monotonic() - started, 30, "the flood must be cut, not waited out")
+        self.assertIn("P07.OUTPUT_FLOOD", codes(probes[0]))
+        self.assertLessEqual(len(probes[0].neutral.stdout), 1_000_000)
+        self.assertTrue(probes[0].neutral.flooded)
+
+    def test_static_only_never_runs_a_handler(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from hookprobe.cli import main
+
+        marker = self.project / "ran.txt"
+        path = self.write_hook("touch.sh", f"#!/bin/sh\ncat >/dev/null\ntouch {marker}\nexit 0\n")
+        self.simple_settings("PreToolUse", str(path))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main([str(self.project), "--no-home", "--static-only"])
+
+        self.assertFalse(marker.exists(), "--static-only must not execute anything")
+        self.assertEqual(code, 0)
+
+    def test_static_only_still_sees_what_disk_shows(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from hookprobe.cli import main
+
+        path = self.write_hook("deny.py", DENY_EXIT_2, executable=False)
+        self.simple_settings("PreToolUse", str(path))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main([str(self.project), "--no-home", "--static-only"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("execute bit", buffer.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

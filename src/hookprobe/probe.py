@@ -822,6 +822,17 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
         )
         return result
 
+    if neutral.flooded:
+        result.findings.append(
+            _finding(
+                "P07.OUTPUT_FLOOD",
+                hook.name,
+                "Wrote more than 1 MB; the probe stopped reading and ended it.",
+                "Claude Code caps hook output far below that. Whatever the handler "
+                "meant to say is lost in the flood.",
+            )
+        )
+
     # The handler demonstrably ran. A static "file does not exist" was therefore
     # a wrong guess about which token is the script; keeping it would contradict
     # the table two lines further down. Measurement beats the guess.

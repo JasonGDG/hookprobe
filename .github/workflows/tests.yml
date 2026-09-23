@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  suites:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # uv and node are what two stress fixtures and two unit tests need; the
+      # suites skip those cases when either is missing, so this only widens
+      # coverage.
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: stress fixtures (expected verdict written down first)
+        run: python tests/stress.py
+      - name: whole-configuration scenarios
+        run: python tests/scenarios.py

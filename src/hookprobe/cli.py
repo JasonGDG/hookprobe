@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also measure effectiveness with two real sessions (costs tokens)",
     )
     parser.add_argument(
+        "--static-only",
+        action="store_true",
+        help="do not execute any handler; report only what can be read from disk",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=None,
@@ -183,14 +188,41 @@ def _schema_findings(config) -> list:
     return schema_findings
 
 
-def _probe_all(config, project_dir: Path, timeout: float | None) -> list:
+def _static_probe(hook, project_dir: Path):
+    """Everything that can be read from disk, and nothing that runs."""
+    from .checks import Finding
+    from .probe import HookProbe, check_startable
+
+    probe = HookProbe(hook=hook)
+    try:
+        probe.findings.extend(check_startable(hook, project_dir))
+    except Exception:  # noqa: BLE001
+        pass
+    probe.findings.append(
+        Finding(
+            code="P01.NOT_TESTED",
+            hook=hook.name,
+            severity="info",
+            message="Not executed (--static-only).",
+            detail="",
+        )
+    )
+    return probe
+
+
+def _probe_all(
+    config, project_dir: Path, timeout: float | None, static_only: bool = False
+) -> list:
     probes = []
     for hook in config.hooks:
         # One hook that explodes must not take the report with it -- a race
         # between exists() and stat(), an unwritable temp directory. Report it
         # as unverifiable and carry on.
         try:
-            probe = probe_hook(hook, project_dir, timeout=timeout)
+            if static_only:
+                probe = _static_probe(hook, project_dir)
+            else:
+                probe = probe_hook(hook, project_dir, timeout=timeout)
         except Exception as error:  # noqa: BLE001 - deliberate boundary
             from .checks import Finding
             from .probe import HookProbe
@@ -292,7 +324,16 @@ def main(argv: list[str] | None = None) -> int:
     config = load(project_dir, explicit_settings=settings, include_home=not args.no_home)
 
     schema_findings = _schema_findings(config)
-    probes = _probe_all(config, project_dir, args.timeout)
+    runnable = sum(1 for hook in config.hooks if hook.type == "command")
+    if runnable and not args.static_only:
+        # Said once, plainly: this runs other people's programs with your
+        # environment. The flag that does not is named in the same breath.
+        print(
+            f"Executing {runnable} handler(s) with your environment, several times each; "
+            "--static-only reads the configuration without running anything.",
+            file=sys.stderr,
+        )
+    probes = _probe_all(config, project_dir, args.timeout, args.static_only)
 
     live_ran = False
     channel_verdict: bool | None = None
@@ -320,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Restored the execute bit on:", file=sys.stderr)
             for path in fixed:
                 print(f"  {path}", file=sys.stderr)
-            probes = _probe_all(config, project_dir, args.timeout)
+            probes = _probe_all(config, project_dir, args.timeout, args.static_only)
         else:
             print("Nothing to fix automatically.", file=sys.stderr)
 
@@ -332,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_dir, explicit_settings=settings, include_home=not args.no_home
                 )
                 schema_findings = _schema_findings(config)
-            probes = _probe_all(config, project_dir, args.timeout)
+            probes = _probe_all(config, project_dir, args.timeout, args.static_only)
             print("Probed again after the fixes:")
             print()
 
