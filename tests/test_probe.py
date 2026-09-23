@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -177,12 +178,8 @@ class EvidenceTests(unittest.TestCase):
         from hookprobe import evidence, probe
 
         source = Path(probe.__file__).read_text("utf-8")
-        used = set()
-        for line in source.splitlines():
-            if '"P0' in line or '"P1' in line:
-                for part in line.split('"'):
-                    if part.startswith(("P0", "P1")) and "." in part:
-                        used.add(part)
+        # Only full codes: "P01." is a prefix used in a startswith() guard.
+        used = set(re.findall(r'"(P\d{2}\.[A-Z_]{2,})"', source))
         self.assertTrue(used)
         for code in used:
             entry = evidence.lookup(code)
