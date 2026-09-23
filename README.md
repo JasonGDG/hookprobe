@@ -97,7 +97,8 @@ Python 3.11+, standard library only. No dependencies.
 | **Channel** | whether a deny verdict is honoured in headless mode at all | **yes** (`--live`) |
 
 The default run needs no network, no API key and no tokens **of its own** — but be clear about
-what it does: it **executes every configured hook**, twice, with a payload on stdin. Those are
+what it does: it **executes every configured hook five times** (one neutral probe, two repeats
+for the determinism check, one decoy, one rejection probe), each with a payload on stdin. Those are
 your programs, and they run with your environment in your project directory, exactly as Claude
 Code would run them. If a hook writes files or calls out to the network, it will do that here
 too. Only `--live` spends two real sessions, and it asks first when run from a terminal.
@@ -213,6 +214,13 @@ hookprobe --fix
 Restores missing execute bits — the one repair that is unambiguous. Nothing else is touched:
 rewriting someone's settings file on their behalf is not a repair, it is a second opinion they
 did not ask for. Everything else is reported with the exact command to run.
+
+## Known issues
+
+Verified and unfixed, including the ones that can produce a wrong verdict:
+[KNOWN-ISSUES.md](KNOWN-ISSUES.md). The short version: the handler's configured `timeout` is
+ignored, `--live` reports success when its own run crashed and does not affect the exit code,
+hook output is buffered without a limit, and the probe is not isolated from the project.
 
 ## Known limits of this version
 
