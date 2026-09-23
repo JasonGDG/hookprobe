@@ -448,6 +448,41 @@ def _camouflage(payload: dict[str, Any], cwd: Path) -> dict[str, Any]:
     return disguised
 
 
+# What "dangerous" looks like differs per tool. A Write guard reads file_path
+# and never sees a shell command, so sending it `rm -rf` proves nothing -- the
+# probe would report "no rejection observed" for a guard that works.
+DANGEROUS_INPUT: dict[str, dict[str, Any]] = {
+    "Write": {"file_path": "~/.ssh/authorized_keys", "content": "ssh-rsa AAAA"},
+    "Edit": {
+        "file_path": "/etc/sudoers",
+        "old_string": "root",
+        "new_string": "everyone",
+    },
+    "NotebookEdit": {"notebook_path": "/etc/hosts", "new_source": "127.0.0.1 evil"},
+    "Read": {"file_path": "~/.aws/credentials"},
+    "WebFetch": {"url": "http://169.254.169.254/latest/meta-data/"},
+    "Bash": {"command": "rm -rf /important/data"},
+}
+
+
+def _tool_shaped_deny(payload: dict[str, Any], matcher: str | None) -> dict[str, Any]:
+    """Give the rejection probe a payload the matched tool would actually carry."""
+    if not isinstance(payload, dict) or "tool_name" not in payload:
+        return payload
+    candidates = [
+        part.strip()
+        for part in re.split(r"[|,]", matcher or "")
+        if part.strip() and part.strip() in DANGEROUS_INPUT
+    ]
+    tool = candidates[0] if candidates else payload.get("tool_name")
+    if tool not in DANGEROUS_INPUT:
+        return payload
+    shaped = dict(payload)
+    shaped["tool_name"] = tool
+    shaped["tool_input"] = dict(DANGEROUS_INPUT[tool])
+    return shaped
+
+
 def _decoy(payload: dict[str, Any]) -> dict[str, Any]:
     """The opposite: a payload that loudly says 'you are being tested'."""
     if not isinstance(payload, dict):
@@ -569,6 +604,29 @@ def check_payload_sensitivity(
             )
         )
     return findings
+
+
+DECIDING_MARKERS = (
+    "exit(2)", "exit 2", "sys.exit(2)", "permissiondecision",
+    '"deny"', "'deny'", "blocked", "refuse", "reject", "not allowed", "forbidden",
+)
+
+
+def _intends_to_decide(hook: HookEntry, cwd: Path) -> bool:
+    """Does this handler look like it wants to decide anything?
+
+    A logging hook that rejects nothing is doing its job. Saying "rejected
+    nothing" about it is noise, and noise in a report about silent failures is
+    the one thing that gets a tool uninstalled.
+    """
+    path = _script_path(hook, cwd)
+    if path is None:
+        return True  # cannot read it, so do not assume it is harmless
+    try:
+        body = path.read_text("utf-8", "replace").lower()
+    except OSError:
+        return True
+    return any(marker in body for marker in DECIDING_MARKERS)
 
 
 def _looks_like_decision(text: str) -> bool:
@@ -810,7 +868,8 @@ def _probe_blocking(
         )
         return True
 
-    deny = run_handler(hook, _camouflage(build_payload(hook, "deny"), cwd), limit, cwd)
+    deny_payload = _tool_shaped_deny(build_payload(hook, "deny"), hook.matcher)
+    deny = run_handler(hook, _camouflage(deny_payload, cwd), limit, cwd)
     result.deny = deny
     if not deny.started or deny.timed_out:
         result.findings.append(
@@ -874,12 +933,13 @@ def _probe_blocking(
         )
         return False
 
-    result.findings.append(
-        _finding(
-            "P08.NO_BLOCK_OBSERVED",
-            hook.name,
-            "No rejection observed for a payload that should be refused.",
-            "Either the hook allows it on purpose, or it never rejects anything.",
+    if _intends_to_decide(hook, cwd):
+        result.findings.append(
+            _finding(
+                "P08.NO_BLOCK_OBSERVED",
+                hook.name,
+                "Looks like a guard, but rejected nothing.",
+                "Its source mentions a rejection path, yet the probe payload passed.",
+            )
         )
-    )
     return None

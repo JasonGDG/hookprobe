@@ -123,6 +123,25 @@ def render_text(
     out.extend(_table(headers, rows))
     out.append("")
 
+    # The count alone can mislead. A configuration where five logging hooks work
+    # and all three guards are dead reads as "3 of 8" -- true, and useless. Name
+    # the case where nothing is left that could stop anything.
+    from .probe import _intends_to_decide
+
+    guards = [
+        p
+        for p in probes
+        if p.hook.event in _rejectable()
+        and _intends_to_decide(p.hook, Path(config.project_dir))
+    ]
+    dead_guards = [p for p in guards if p.is_broken or p.can_block is False]
+    if guards and len(dead_guards) == len(guards):
+        out.append(
+            f"No working guard left: all {len(guards)} handlers that could block "
+            "are broken. The rest of this configuration only observes."
+        )
+        out.append("")
+
     broken = [p for p in probes if p.is_broken]
     if broken:
         verb = "is" if len(broken) == 1 else "are"

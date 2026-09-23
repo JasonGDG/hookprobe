@@ -226,9 +226,24 @@ cannot be verified from outside — hookprobe says so instead of reporting a pas
 ```sh
 python -m unittest discover -v   # 27 unit tests
 python tests/stress.py -v        # 47 fixtures with a written-down expected verdict
+python tests/scenarios.py        # three whole configurations, end to end
 ```
 
 Every test mirrors a documented failure case; the fixtures are real files on disk, not mocks.
+
+### Three configurations, end to end
+
+Single fixtures test single judgements; `tests/scenarios.py` asks whether the report as a whole
+tells the truth. Every guard healthy must produce nothing to report and exit 0. Every guard
+broken, one way each, must produce every finding and exit 1. And the third case is the one that
+matters: the guards dead while the logging hooks work — the exact shape of a false sense of
+safety. "3 of 8 hooks are not protecting anything" is true there and useless, so the report
+names it:
+
+```
+No working guard left: all 3 handlers that could block are broken.
+The rest of this configuration only observes.
+```
 
 ### Making the invisible visible
 
