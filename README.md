@@ -127,20 +127,33 @@ for `SessionStart`.
 
 ## What it cannot do
 
-A probe proves the moment of the test, not the future. These stay out of reach, and all of them
-are documented failures:
+Some of this list used to be longer. `--watch` and the probe-hardening closed four of the
+entries; what stands below is what genuinely remains, with the ones that only moved rather than
+disappeared marked as such.
 
-- **Time-dependent failures** — a hook can run for hours and then stop, for example because its
-  log grew to 48 GB ([#16047]) or for no visible reason ([#76322]).
-- **State changes after the run** — a single `cd` ends the file watcher for the rest of the
-  session ([#95440]).
-- **Concurrency** — parallel sessions overwrite each other's configuration ([#95474]).
-- **Self-removal** — the agent deletes the hook file meant to restrain it ([#32990]).
-- **Intermittent outages** — hooks gone for 30 minutes, then back by themselves ([#90296]).
+- **A backdoor keyed to one session id** — a handler that allows everything for exactly one
+  `session_id` cannot be found by sampling. The decoy comparison finds handlers that react to
+  *the shape* of the payload; it cannot guess a specific value.
+- **A coin flip** — a verdict that depends on the clock is caught by three repeated probes
+  roughly three times in four, not always.
+- **A handler that removes itself** after its first call ([#32990]) — the probe sees the first
+  answer, and the configuration that produced it is gone by the time anyone looks.
+- **Concurrency** — parallel sessions overwriting each other's configuration ([#95474]) is a
+  race that a sequential probe cannot reproduce.
 - **Someone else's environment** — hookprobe measures the environment it runs in; where the
   configuration lives changes the result ([#85613]).
 
-hookprobe is a thermometer, not medicine. Run it before each session, not once a month.
+Moved rather than solved:
+
+- **Time-dependent failures** ([#16047], [#76322]) and **intermittent outages** ([#90296]) are
+  reachable with `--watch`, but only for what the heartbeat itself observes: it proves that the
+  hook mechanism is alive, not that *your particular guard* still fires. A guard that dies while
+  the heartbeat keeps beating is still invisible.
+- **State changes after the run** — a `cd` that ends a file watcher ([#95440]) shows up in
+  `--watch` as a heartbeat gap only if it takes the heartbeat with it.
+
+hookprobe is a thermometer, not medicine. Run it before each session, and leave `--watch`
+running during it.
 
 ## How this differs from existing tools
 

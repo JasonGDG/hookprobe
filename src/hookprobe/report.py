@@ -193,8 +193,9 @@ def render_text(
         out.append("Run with --live to check it against a real session.")
     out.append("")
     out.append(
-        "A probe proves the moment of the test, not the future: time-dependent "
-        "failures, state changes after the run and concurrency stay out of reach."
+        "A probe proves the moment of the test. For the failures that happen "
+        "later -- a hook that stops firing mid-session -- install the heartbeat "
+        "and leave --watch running: hookprobe --install-heartbeat"
     )
     return "\n".join(out).rstrip() + "\n"
 

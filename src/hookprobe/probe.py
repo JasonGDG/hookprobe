@@ -37,8 +37,9 @@ from .config import HookEntry
 # Documented cap for additionalContext, systemMessage, initialUserMessage and
 # plain stdout. Above it Claude Code writes the value to a file and substitutes
 # a 2,000 character preview -- and does not ask Claude to read that file.
-OUTPUT_CAP = 10_000
-NEAR_CAP = 8_000
+from .checks import OUTPUT_CAP  # noqa: E402
+
+NEAR_CAP = int(OUTPUT_CAP * 0.8)
 
 # Events where plain-text stdout is legitimate: Claude Code adds it as context
 # that Claude can see. For every other event stdout goes to the debug log, so a
@@ -53,28 +54,17 @@ REJECTABLE_EVENTS = frozenset(
     {"PreToolUse", "PostToolUse", "PostToolBatch", "UserPromptSubmit"}
 )
 
-# Events whose handlers can block the action at all. A "can block" verdict is
-# only meaningful for these; for the rest the column reads n/a.
-BLOCKING_EVENTS = frozenset(
-    {
-        "PreToolUse",
-        "PostToolUse",
-        "PostToolBatch",
-        "UserPromptSubmit",
-        "Stop",
-        "SubagentStop",
-        "PreCompact",
-        "SessionStart",
-        "SessionEnd",
-        "Notification",
-        "TaskCreated",
-        "TaskCompleted",
-        "FileChanged",
-        "CwdChanged",
-        "WorktreeCreate",
-        "WorktreeRemove",
-    }
-)
+# One canonical table, imported rather than restated. The hand-written copy that
+# used to live here listed PostToolUse and SessionStart as blocking, which the
+# documented "exit code 2 behavior per event" table contradicts -- a tool that
+# reports on other people's configuration cannot afford its own second opinion.
+from .checks import BLOCKING_EVENTS  # noqa: E402
+
+# Of those, the ones where a rejection payload is meaningful: a probe with a
+# dangerous-looking tool call only tells us something where a tool call exists.
+REJECTABLE_EVENTS = frozenset(
+    {"PreToolUse", "UserPromptSubmit", "UserPromptExpansion", "PostToolBatch"}
+) & BLOCKING_EVENTS
 
 
 @dataclass
