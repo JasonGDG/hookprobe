@@ -144,6 +144,19 @@ def run(project_dir: Path, timeout: float = 180.0) -> LiveResult:
         guarded_code, guarded_log = _run_session(guarded_dir, guarded_settings, timeout)
         guarded_effect = (guarded_dir / CANARY_NAME).exists()
 
+    if guarded_code not in (0, None):
+        return LiveResult(
+            True,
+            None,
+            "Inconclusive: the guarded session itself failed (exit "
+            f"{guarded_code}). A missing canary file proves nothing when the run "
+            "that was supposed to create it did not finish.",
+            control_effect,
+            guarded_effect,
+            control_log,
+            guarded_log,
+        )
+
     if not control_effect:
         return LiveResult(
             True,

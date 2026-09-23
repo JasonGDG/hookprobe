@@ -90,6 +90,7 @@ Python 3.11+, standard library only. No dependencies.
 | **Timeout** | a hook waiting on stdin runs into its timeout — and a timed-out `PreToolUse` hook does **not** block | no |
 | **Placement** | hooks in agent frontmatter, `once: true` in skills, plugin sources | partly |
 | **Still firing** | hooks that stop mid-session, long after any one-off check | `--watch` |
+| **Which one died** | one handler stops while the others keep going | `--record` |
 | **Determinism** | the same request answered differently on the second try | no |
 | **Hidden inputs** | a verdict that changes with the session id, or only while it is watched | no |
 | **Wrapped commands** | `guard 2>/dev/null \|\| exit 0` when `guard` is not installed | no |
@@ -147,9 +148,8 @@ disappeared marked as such.
 Moved rather than solved:
 
 - **Time-dependent failures** ([#16047], [#76322]) and **intermittent outages** ([#90296]) are
-  reachable with `--watch`, but only for what the heartbeat itself observes: it proves that the
-  hook mechanism is alive, not that *your particular guard* still fires. A guard that dies while
-  the heartbeat keeps beating is still invisible.
+  reachable with `--watch` for the mechanism as a whole, and with `--record` per handler —
+  at the price of routing each command through a recorder.
 - **State changes after the run** — a `cd` that ends a file watcher ([#95440]) shows up in
   `--watch` as a heartbeat gap only if it takes the heartbeat with it.
 
@@ -204,6 +204,39 @@ The alarm is one specific thing: **this project's session wrote to its transcrip
 reported in.** A quiet heartbeat during a quiet session means nothing and is not reported as a
 problem. The comparison is scoped to the project the heartbeat is installed in, so another busy
 project cannot raise a false alarm.
+
+### Per handler, during real work
+
+The heartbeat proves that *some* hook fired. It cannot say which one, so a guard that quietly
+dies while the logging hooks keep beating stays invisible. `--record` closes that:
+
+```sh
+hookprobe --record-install   # route each handler through a transparent recorder
+# ... work as usual ...
+hookprobe --record
+hookprobe --record-remove
+```
+
+```
+Handler                 calls  last result       took   last seen
+-----------------------------------------------------------------
+PreToolUse:deny-rm.py   34     exit 0, 2 blocked  41 ms  12s ago
+PreToolUse:audit.sh     34     exit 0             8 ms   12s ago
+PostToolUse:log.sh      0      -                  -      never
+
+1 of 3 handlers never ran while the others did: PostToolUse:log.sh
+```
+
+The recorder runs the original and writes down what happened. It is transparent by
+construction: stdin forwarded, stdout and stderr handed through byte for byte, exit code passed
+along — stdout carries the decision and the exit code *is* the verdict. If the recorder cannot
+start the original it says so and exits 0, the same thing Claude Code does with a handler it
+cannot launch, so wrapping is never stricter than not wrapping. A test asserts exactly that, for
+an allowing and a blocking payload.
+
+The closest existing tool, `clooks`, converts command hooks into HTTP hooks behind a daemon.
+This leaves the handlers, the settings shape and the failure modes as they were and only adds a
+witness.
 
 ## Repairing
 

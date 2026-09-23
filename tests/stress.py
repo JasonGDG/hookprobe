@@ -271,7 +271,7 @@ CASES: list[Case] = [
         )},
         executable=("g.py",),
         command="{g.py}",
-        broken=True,
+        broken=False,  # context quality is not protection; reported as a warning
         wants=("P07.OVER_CAP",),
     ),
     Case(

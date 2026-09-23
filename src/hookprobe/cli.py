@@ -92,6 +92,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --watch: keep printing when the verdict changes",
     )
     watch.add_argument(
+        "--record-install",
+        action="store_true",
+        help="route every command handler through a transparent recorder",
+    )
+    watch.add_argument(
+        "--record-remove",
+        action="store_true",
+        help="remove the recorder again",
+    )
+    watch.add_argument(
+        "--record",
+        action="store_true",
+        help="show what each handler did during real sessions",
+    )
+    watch.add_argument(
         "--window",
         type=float,
         default=900.0,
@@ -100,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"hookprobe {__version__}")
     return parser
+
+
+def _settings_path_hint(project_dir: Path) -> Path:
+    return project_dir / ".claude" / "settings.local.json"
 
 
 def _apply_fixes(probes: list) -> list[str]:
@@ -150,6 +169,29 @@ def main(argv: list[str] | None = None) -> int:
         print("Heartbeat removed from: " + (", ".join(removed) or "nothing"))
         return 0
 
+    from . import record as record_module
+
+    if args.record_install:
+        config = load(project_dir, include_home=not args.no_home)
+        wrapped = record_module.wrap(project_dir, config.hooks)
+        print(f"Recording {len(wrapped)} handlers:")
+        for label in wrapped:
+            print(f"  {label}")
+        print(f"Settings: {_settings_path_hint(project_dir)}")
+        print("Work as usual, then: hookprobe --record")
+        print("Remove again with --record-remove.")
+        return 0
+
+    if args.record_remove:
+        removed = record_module.unwrap(project_dir)
+        print(f"Removed {removed} recorder entries.")
+        return 0
+
+    if args.record:
+        config = load(project_dir, include_home=not args.no_home)
+        sys.stdout.write(record_module.render(project_dir, config.hooks, args.window))
+        return 0
+
     if args.watch:
         if args.follow:
             return watch_module.follow(project_dir, window=args.window)
@@ -186,9 +228,30 @@ def main(argv: list[str] | None = None) -> int:
         )
     probes = []
     for hook in config.hooks:
-        probe = probe_hook(hook, project_dir, timeout=args.timeout)
-        probe.findings.extend(check_matcher(hook))
-        probe.findings.extend(check_location(hook))
+        # One hook that explodes must not take the report with it -- a race
+        # between exists() and stat(), an unwritable temp directory. Report it
+        # as unverifiable and carry on.
+        try:
+            probe = probe_hook(hook, project_dir, timeout=args.timeout)
+        except Exception as error:  # noqa: BLE001 - deliberate boundary
+            from .checks import Finding
+            from .probe import HookProbe
+
+            probe = HookProbe(hook=hook)
+            probe.findings.append(
+                Finding(
+                    code="P01.NOT_TESTED",
+                    hook=hook.name,
+                    severity="warning",
+                    message="This hook could not be probed.",
+                    detail=f"{type(error).__name__}: {error}",
+                )
+            )
+        for extra in (check_matcher, check_location):
+            try:
+                probe.findings.extend(extra(hook))
+            except Exception:  # noqa: BLE001
+                pass
         probes.append(probe)
 
     live_ran = False
@@ -204,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             if answer not in {"y", "yes"}:
                 print("Stopped before the live stage.", file=sys.stderr)
                 return 2
-        result = live_stage.run(project_dir)
+        result = live_stage.run(project_dir, timeout=args.timeout or 180.0)
         live_ran = result.ran
         if result.ran:
             live_stage.apply(probes, result)
@@ -228,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.explain:
         sys.stdout.write(report_module.render_explain(args.explain, probes))
-        return 0
+        return 1 if any(probe.is_broken for probe in probes) else 0
 
     if args.json:
         sys.stdout.write(
@@ -243,7 +306,10 @@ def main(argv: list[str] | None = None) -> int:
 
     broken = any(probe.is_broken for probe in probes)
     critical_config = any(f.severity == "critical" for f in schema_findings)
-    return 1 if (broken or critical_config or config.disable_all_hooks) else 0
+    # A channel where a deny verdict is ignored makes every guard decoration,
+    # so it has to reach the exit code the README promises.
+    channel_dead = channel_verdict is False
+    return 1 if (broken or critical_config or config.disable_all_hooks or channel_dead) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

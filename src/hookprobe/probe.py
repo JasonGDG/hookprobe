@@ -697,8 +697,14 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
         )
         return result
 
-    limit = timeout or default_timeout(hook.event, "command")
+    # The handler's own timeout is what Claude Code enforces; a hook that
+    # answers after its limit is discarded there, so crediting it with blocking
+    # would be a false green on the one column that matters.
+    declared = hook.timeout if isinstance(hook.timeout, (int, float)) else None
+    limit = timeout or declared or default_timeout(hook.event, "command")
     limit = min(float(limit), 20.0)
+    if declared and not timeout and float(declared) < limit:
+        limit = float(declared)
 
     neutral = run_handler(hook, _camouflage(build_payload(hook, "neutral"), cwd), limit, cwd)
     result.neutral = neutral
@@ -795,7 +801,13 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
             )
         )
 
-    result.answers = bool(neutral.stdout.strip()) or neutral.exit_code == 0
+    # Exit 2 is the most definite answer a handler can give. Treating it as "no
+    # answer" filed the strictest guard in the broken list.
+    result.answers = (
+        bool(neutral.stdout.strip())
+        or neutral.exit_code == 0
+        or neutral.exit_code == 2
+    )
 
     for label, value in _capped_strings(payload, neutral.stdout).items():
         if len(value) > OUTPUT_CAP:

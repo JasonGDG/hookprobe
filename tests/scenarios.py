@@ -168,7 +168,9 @@ def main_entry() -> int:
     root = Path(tempfile.mkdtemp(prefix="guardscenarios-"))
     expectations = {
         "all-on": (0, 0),      # exit code, hooks reported broken
-        "all-off": (1, 7),   # noisy.sh is plain text on UserPromptSubmit, which is legitimate
+        # noisy.sh is legitimate plain text on UserPromptSubmit, and huge.py is a
+        # context problem rather than a protection one -- both are warnings.
+        "all-off": (1, 6),
         "inverted": (1, 3),
     }
     builders = {

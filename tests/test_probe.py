@@ -376,5 +376,111 @@ class WatchTests(ProjectTestCase):
         watch.uninstall(self.project)
 
 
+
+
+class RecorderTests(ProjectTestCase):
+    """The recorder sits in the decision path. If it changes anything -- the
+    exit code, stdout, even by a byte -- it has broken the thing it observes."""
+
+    GUARD = (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "data = json.load(sys.stdin)\n"
+        'if "rm " in json.dumps(data):\n'
+        '    sys.stderr.write("refused by policy\\n")\n'
+        "    sys.exit(2)\n"
+        "print('{\"permissionDecision\": \"allow\"}')\n"
+    )
+
+    def _run(self, command: list[str], payload: str, env: dict | None = None):
+        import os
+        import subprocess
+
+        environment = dict(os.environ)
+        environment.update(env or {})
+        return subprocess.run(
+            command,
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=environment,
+        )
+
+    def test_recorder_is_byte_for_byte_transparent(self) -> None:
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        config = self.load()
+        record.wrap(self.project, config.hooks)
+        recorder = self.project / ".claude" / "hooks" / "hookprobe-recorder.py"
+
+        for payload in (
+            '{"tool_name":"Bash","tool_input":{"command":"ls"}}',
+            '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}',
+        ):
+            with self.subTest(payload=payload):
+                direct = self._run([str(path)], payload)
+                through = self._run(
+                    [str(recorder)],
+                    payload,
+                    {
+                        "HOOKPROBE_LABEL": "test",
+                        "HOOKPROBE_EVENT": "PreToolUse",
+                        "HOOKPROBE_ORIGINAL": str(path),
+                    },
+                )
+                self.assertEqual(direct.returncode, through.returncode)
+                self.assertEqual(direct.stdout, through.stdout)
+                self.assertEqual(direct.stderr, through.stderr)
+
+    def test_recorder_never_becomes_stricter_than_the_original(self) -> None:
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        record.wrap(self.project, self.load().hooks)
+        recorder = self.project / ".claude" / "hooks" / "hookprobe-recorder.py"
+
+        result = self._run(
+            [str(recorder)],
+            "{}",
+            {
+                "HOOKPROBE_LABEL": "test",
+                "HOOKPROBE_EVENT": "PreToolUse",
+                "HOOKPROBE_ORIGINAL": "/definitely/not/here",
+            },
+        )
+        self.assertNotEqual(result.returncode, 2, "a broken recorder must not block")
+
+    def test_wrap_is_reversible(self) -> None:
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        local = self.project / ".claude" / "settings.local.json"
+        local.write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}), "utf-8")
+
+        record.wrap(self.project, self.load().hooks)
+        self.assertTrue(record.is_wrapped(self.project))
+        record.unwrap(self.project)
+        self.assertFalse(record.is_wrapped(self.project))
+        self.assertIn("Stop", json.loads(local.read_text("utf-8"))["hooks"])
+        self.assertFalse(
+            (self.project / ".claude" / "hooks" / "hookprobe-recorder.py").exists()
+        )
+
+    def test_report_names_handlers_that_never_ran(self) -> None:
+        from hookprobe import record
+
+        path = self.write_hook("guard.py", self.GUARD)
+        self.simple_settings("PreToolUse", str(path))
+        config = self.load()
+        text = record.render(self.project, config.hooks, 900.0)
+        self.assertIn("guard.py", text)
+        self.assertIn("never", text)
+
+
 if __name__ == "__main__":
     unittest.main()

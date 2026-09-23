@@ -424,7 +424,7 @@ EVIDENCE: dict[str, Evidence] = {
         _e(
             "P07.OVER_CAP",
             "Hook output exceeds the context cap",
-            "critical",
+            "warning",
             'For values over 10,000 characters, "Claude Code doesn\'t ask Claude to read the file" containing the remainder, so policy or context after the preview may never reach the model.',
             "Reduce each emitted context field below 10,000 characters and put essential material in the first 2,000.",
             "anthropics/claude-code#94358",

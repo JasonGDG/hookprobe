@@ -8,29 +8,37 @@ Every entry was reproduced. Codes in brackets refer to the code review of 22.09.
 
 ## Wrong verdicts are possible
 
-**The configured timeout is ignored.** [K9]
+**Fixed since this list was written:** the configured timeout is now respected, exit 2 counts as
+an answer, the output cap is a warning rather than a protection failure, `--live` reports
+inconclusive when its own guarded run crashed and now reaches the exit code, `--explain` returns
+the real status, `--timeout` reaches `--live`, and one hook that explodes no longer takes the
+report with it. What follows is what is still open.
+
+**~~The configured timeout is ignored.~~** [K9] — fixed.
 `hook.timeout` is never read. The probe uses the documented default, capped at 20 s. A handler
 declared with `"timeout": 2` that answers after 8 s with exit 2 is reported as `can block: yes`,
 while Claude Code discards it after 2 s and lets the call through. False green on the one column
 that matters.
 
-**A handler that rejects the neutral payload is called broken.** [K6]
+**~~A handler that rejects the neutral payload is called broken.~~** [K6] — fixed.
 `answers` is derived from `stdout or exit_code == 0`. A strict allowlist guard refuses the
 ordinary probe on purpose, exits 2 and writes its reason to stderr — and lands in the broken
 list. The `P08.BLOCKS_EVERYTHING` finding explains it, but the verdict above it still reads
 `answers: no`.
 
-**Output over the cap counts as "not protecting anything".** [W2]
+**~~Output over the cap counts as "not protecting anything".~~** [W2] — fixed.
 `P07.OVER_CAP` is `critical`, so a working `SessionStart` context hook with 10 001 characters is
 counted in the broken total. Context quality and protection are different questions and should
 not share a counter.
 
-**`--live` reports success when its own run crashed.** [K13]
+**~~`--live` reports success when its own run crashed.~~** [K13] — fixed.
 Only the presence of the canary file is evaluated. If the guarded session fails on auth, a rate
 limit or a timeout, the file is absent for the wrong reason and the verdict is
 `a deny verdict takes effect`. `guarded_code` is written into the message and never checked.
 
-**`--live` has no effect on the exit code.** [K14]
+**`--live` still attributes the channel verdict to handlers it did not test.** [K14, partly]
+The exit code now turns 1 when the channel ignores a deny, but the `effective` column is still
+filled from a measurement of hookprobe's own canary hook rather than of each handler.
 `effective=False` leaves `is_broken` untouched, so the run still exits 0 — against the README's
 promise that the exit code turns 1 as soon as a hook is ineffective. The channel verdict is also
 attributed to every handler that blocks, although only hookprobe's own canary hook was measured.
@@ -71,11 +79,10 @@ all — receives the Bash-shaped payload, so a guard for those tools can still c
 `{"continue": false}` is not read as a stop signal, and `hookSpecificOutput` without
 `hookEventName` is accepted although the schema requires it.
 
-**One exception ends the whole run.** [W11]
-The loop over hooks has no error boundary. A race between `exists()` and `stat()`, or an
-unwritable temp directory, takes down the report instead of marking one hook unverifiable.
+**~~One exception ends the whole run.~~** [W11] — fixed: each hook is probed inside its own
+boundary and an exception marks that hook unverifiable.
 
-**`--explain` always exits 0** [W9] and **`--timeout` never reaches `--live`** [W10].
+**~~`--explain` always exits 0~~** [W9] and **~~`--timeout` never reaches `--live`~~** [W10] — both fixed.
 
 ## Judgement calls that may be wrong
 
