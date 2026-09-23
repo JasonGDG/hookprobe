@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shlex
+import uuid
 import shutil
 import stat
 from dataclasses import dataclass, field
@@ -418,6 +419,188 @@ def launch_failed(result: RunResult, command: str = "") -> str | None:
     return None
 
 
+def _camouflage(payload: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    """Strip the probe's fingerprints.
+
+    The default payload announced itself -- session id "hookprobe-probe-session",
+    paths under a hookprobe directory. Any handler could read that and behave
+    differently while being measured, which is precisely the case a probe must
+    not be blind to. So the ordinary run looks like ordinary work.
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    def scrub(value: Any) -> Any:
+        # The tool name leaks through more than the obvious fields: the canary
+        # command and the tool_use_id carried it too. Anything a handler could
+        # grep for has to go, or the probe is only measuring handlers that do
+        # not bother to look.
+        if isinstance(value, str):
+            return re.sub(r"hookprobe[-_]?probe|hookprobe", "check", value, flags=re.I)
+        if isinstance(value, dict):
+            return {key: scrub(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    disguised = {key: scrub(item) for key, item in payload.items()}
+    disguised["session_id"] = str(uuid.uuid4())
+    disguised["cwd"] = str(cwd)
+    disguised["transcript_path"] = str(
+        Path.home()
+        / ".claude"
+        / "projects"
+        / str(cwd).replace("/", "-")
+        / f"{uuid.uuid4()}.jsonl"
+    )
+    if "tool_use_id" in disguised:
+        disguised["tool_use_id"] = "toolu_" + uuid.uuid4().hex[:16]
+    return disguised
+
+
+def _decoy(payload: dict[str, Any]) -> dict[str, Any]:
+    """The opposite: a payload that loudly says 'you are being tested'."""
+    if not isinstance(payload, dict):
+        return payload
+    obvious = dict(payload)
+    obvious["session_id"] = "hookprobe-probe-session"
+    obvious["transcript_path"] = "/tmp/hookprobe-probe/transcript.jsonl"
+    obvious["cwd"] = "/tmp/hookprobe-probe"
+    return obvious
+
+
+def _resolves(word: str, cwd: Path) -> bool:
+    """Is this command word something that can actually be executed?"""
+    word = word.strip().strip('"').strip("'")
+    if not word or word.startswith("-"):
+        return True  # an option, not a program
+    candidate = Path(os.path.expanduser(word))
+    if candidate.is_absolute() or "/" in word:
+        return (candidate if candidate.is_absolute() else cwd / candidate).exists()
+    return shutil.which(word) is not None
+
+
+def check_wrapped_commands(hook: HookEntry, cwd: Path) -> list[Finding]:
+    """Look inside a shell construct: does the program it wraps exist?
+
+    This is the answer to the hook that hides its own failure. `cmd 2>/dev/null
+    || exit 0` exits cleanly whether or not cmd is there, so the run tells us
+    nothing -- but resolving the words of the command line does.
+    """
+    findings: list[Finding] = []
+    command = _expanded_command(hook, cwd)
+    if not command or "${" in command:
+        return findings
+    if not any(symbol in command for symbol in ("|", ";", "&&", "||", ">", "<")):
+        return findings
+
+    # First word of each segment: that is where a program name sits.
+    segments = re.split(r"\|\||&&|\||;|\n", command)
+    seen: set[str] = set()
+    for segment in segments:
+        words = _tokens(segment.strip())
+        if not words:
+            continue
+        program = words[0]
+        if program in seen or program in {"exit", "true", "false", "return", "echo", "cd"}:
+            continue
+        seen.add(program)
+        if _is_interpreter(program):
+            continue
+        if not _resolves(program, cwd):
+            findings.append(
+                _finding(
+                    "P11.WRAPPED_COMMAND_MISSING",
+                    hook.name,
+                    f"{program!r} is neither on PATH nor on disk.",
+                    f"In {command[:120]!r} -- the construct exits cleanly anyway.",
+                )
+            )
+    return findings
+
+
+def check_determinism(hook: HookEntry, cwd: Path, limit: float, first: RunResult) -> list[Finding]:
+    """Same payload, twice. A guard that answers differently is not a guard.
+
+    This is what makes a stateful handler visible: we cannot reset someone's
+    counter or lock file, but we can notice that it exists.
+    """
+    findings: list[Finding] = []
+    if not first.started or first.timed_out:
+        return findings
+    seen = [(first.exit_code, first.stdout.strip())]
+    for _ in range(2):
+        again = run_handler(
+            hook, _camouflage(build_payload(hook, "neutral"), cwd), limit, cwd
+        )
+        if not again.started or again.timed_out:
+            return findings
+        seen.append((again.exit_code, again.stdout.strip()))
+    if len(set(seen)) > 1:
+        codes = " then ".join(str(exit_code) for exit_code, _ in seen)
+        findings.append(
+            _finding(
+                "P11.NONDETERMINISTIC",
+                hook.name,
+                "Identical probes produced different answers.",
+                f"exit codes {codes}. A verdict that changes on its own cannot "
+                "be relied on for the run that matters.",
+            )
+        )
+    return findings
+
+
+def check_payload_sensitivity(
+    hook: HookEntry, cwd: Path, limit: float, first: RunResult
+) -> list[Finding]:
+    """Run the same request once disguised and once obviously as a probe.
+
+    A handler that answers differently is reading fields a decision must not
+    depend on -- the session id, the working directory, or a marker that says
+    'this is a test'. That covers the backdoor keyed to one session as well as
+    the hook that behaves itself only while someone is watching.
+    """
+    findings: list[Finding] = []
+    if not first.started or first.timed_out:
+        return findings
+    payload = build_payload(hook, "neutral")
+    if not isinstance(payload, dict):
+        return findings
+    other = run_handler(hook, _decoy(payload), limit, cwd)
+    if not other.started or other.timed_out:
+        return findings
+    if other.exit_code != first.exit_code or other.stdout.strip() != first.stdout.strip():
+        findings.append(
+            _finding(
+                "P11.PAYLOAD_SENSITIVE",
+                hook.name,
+                "The answer changed when only session id and cwd changed.",
+                f"exit {first.exit_code} vs {other.exit_code}.",
+            )
+        )
+    return findings
+
+
+def _looks_like_decision(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        return False
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(value, dict):
+        return False
+    keys = set(value) | set(
+        value.get("hookSpecificOutput", {}) if isinstance(value.get("hookSpecificOutput"), dict) else {}
+    )
+    return bool(keys & {"permissionDecision", "decision", "continue", "additionalContext"})
+
+
+def _decision_on_stderr(result: RunResult) -> bool:
+    return not result.stdout.strip() and _looks_like_decision(result.stderr)
+
+
 def _decode_json(text: str) -> tuple[dict[str, Any] | None, str | None]:
     """Parse hook stdout the way the harness does: exactly one JSON object."""
     stripped = text.strip()
@@ -469,7 +652,7 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
     limit = timeout or default_timeout(hook.event, "command")
     limit = min(float(limit), 20.0)
 
-    neutral = run_handler(hook, build_payload(hook, "neutral"), limit, cwd)
+    neutral = run_handler(hook, _camouflage(build_payload(hook, "neutral"), cwd), limit, cwd)
     result.neutral = neutral
     result.starts = bool(neutral.started)
 
@@ -516,6 +699,20 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
             )
         )
         return result
+
+    result.findings.extend(check_wrapped_commands(hook, cwd))
+    result.findings.extend(check_determinism(hook, cwd, limit, neutral))
+    result.findings.extend(check_payload_sensitivity(hook, cwd, limit, neutral))
+
+    if _decision_on_stderr(neutral):
+        result.findings.append(
+            _finding(
+                "P09.DECISION_ON_STDERR",
+                hook.name,
+                "A decision-shaped object went to stderr; stdout stayed empty.",
+                neutral.stderr.strip()[:120],
+            )
+        )
 
     payload, problem = _decode_json(neutral.stdout)
     plain_text_allowed = hook.event in CONTEXT_STDOUT_EVENTS
@@ -623,7 +820,7 @@ def _probe_blocking(
         )
         return True
 
-    deny = run_handler(hook, build_payload(hook, "deny"), limit, cwd)
+    deny = run_handler(hook, _camouflage(build_payload(hook, "deny"), cwd), limit, cwd)
     result.deny = deny
     if not deny.started or deny.timed_out:
         result.findings.append(
@@ -656,6 +853,14 @@ def _probe_blocking(
             decision = nested.get("permissionDecision") or nested.get("decision")
 
     if deny.exit_code == 2:
+        if decision in {"allow", "approve"}:
+            result.findings.append(
+                _finding(
+                    "P08.CONTRADICTORY_DECISION",
+                    hook.name,
+                    "Exits 2 while its JSON says allow; the exit code wins.",
+                )
+            )
         result.findings.append(
             _finding(
                 "P08.BLOCKED_AS_EXPECTED",

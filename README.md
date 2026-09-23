@@ -90,6 +90,9 @@ Python 3.11+, standard library only. No dependencies.
 | **Timeout** | a hook waiting on stdin runs into its timeout — and a timed-out `PreToolUse` hook does **not** block | no |
 | **Placement** | hooks in agent frontmatter, `once: true` in skills, plugin sources | partly |
 | **Still firing** | hooks that stop mid-session, long after any one-off check | `--watch` |
+| **Determinism** | the same request answered differently on the second try | no |
+| **Hidden inputs** | a verdict that changes with the session id, or only while it is watched | no |
+| **Wrapped commands** | `guard 2>/dev/null \|\| exit 0` when `guard` is not installed | no |
 | **Effectiveness** | the hook fires, but its verdict does not change the call | **yes** (`--live`) |
 | **Channel** | whether a deny verdict is honoured in headless mode at all | **yes** (`--live`) |
 
@@ -209,18 +212,41 @@ cannot be verified from outside — hookprobe says so instead of reporting a pas
 
 ```sh
 python -m unittest discover -v   # 27 unit tests
-python tests/stress.py -v        # 33 fixtures with a written-down expected verdict
+python tests/stress.py -v        # 47 fixtures with a written-down expected verdict
 ```
 
 Every test mirrors a documented failure case; the fixtures are real files on disk, not mocks.
+
+### Making the invisible visible
+
+Four of the cases that used to come back as "cannot see that" now have an answer, and the
+method is the same each time: stop asking the handler, and change what it is asked.
+
+| Case | Why a single run says nothing | What makes it visible |
+|---|---|---|
+| Hook hides its failure behind `\|\| exit 0` | it exits 0 either way | resolve every command word against PATH and disk |
+| Hook keeps state and blocks only sometimes | one run is one sample | run the identical payload three times and compare |
+| Hook behaves while it is watched | the probe announced itself | scrub the tool name from the payload, then send a decoy that carries it |
+| Hook writes its decision to stderr | stdout is empty, exit 0 | recognise decision-shaped JSON on the wrong stream |
+
+The probe used to introduce itself: `session_id: "hookprobe-probe-session"`, a canary command
+reading `echo hookprobe`, a tool id of `toolu_hookprobe_probe`. Any handler could grep for that
+and behave differently exactly while being measured. The ordinary run now looks like ordinary
+work, and the obvious payload is kept as a decoy — a handler that answers differently to the
+two is telling you something.
+
+Three cases remain honestly out of reach, and they stay in the suite as observations rather
+than passes: a backdoor keyed to **one** session id (sampling cannot find it), a coin flip
+(three probes catch it about 75% of the time), and a handler that deletes itself after the
+first call.
 
 `tests/stress.py` is the harder one: each fixture carries the verdict hookprobe is supposed to
 reach, written down before the run. Three groups — **healthy** hooks that must never be called
 broken, **broken** ones that must be caught with the right reason, and **adversarial** ones
 built to fool the probe, where "unverifiable" counts as a pass and a confident wrong answer
-counts as a failure. It found four real defects the unit tests missed, including a shell syntax
-error being read as a working guard and `async: true` handlers being credited with blocking
-they cannot do.
+counts as a failure. It found seven real defects the unit tests missed, including a shell syntax
+error being read as a working guard, `async: true` handlers credited with blocking they cannot
+do, and the probe announcing itself in three separate fields.
 
 ## License
 

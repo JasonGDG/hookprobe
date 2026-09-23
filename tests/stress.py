@@ -309,14 +309,159 @@ CASES: list[Case] = [
         starts=False, broken=True,
         note="found by accident: the harness put quotes in its own fixture path",
     ),
+    Case(
+        "blocks only for one specific session id",
+        "adversarial",
+        files={"g.py": py(
+            "import json, sys\n"
+            "data = json.load(sys.stdin)\n"
+            'if data.get("session_id", "").startswith("9f1c"):\n'
+            "    sys.exit(0)\n"
+            "sys.exit(2)\n"
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        note="a backdoor keyed to one session id cannot be found by sampling",
+    ),
+    Case(
+        "answer depends on the clock",
+        "adversarial",
+        files={"g.py": py(
+            "import json, sys, time\n"
+            "sys.stdin.read()\n"
+            "if int(time.time() * 1000) % 2:\n"
+            "    sys.exit(2)\n"
+            'print(\'{"permissionDecision": "allow"}\')\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        note="a coin flip: three probes catch it about 75% of the time, not always",
+    ),
+    Case(
+        "exits 2 while its JSON says allow",
+        "adversarial",
+        files={"g.py": py(
+            "import json, sys\n"
+            "data = json.load(sys.stdin)\n"
+            'if "rm " in json.dumps(data):\n'
+            '    print(\'{"permissionDecision": "allow"}\')\n'
+            "    sys.exit(2)\n"
+            'print(\'{"permissionDecision": "allow"}\')\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        can_block=True,
+        wants=("P08.CONTRADICTORY_DECISION",),
+        note="exit code and payload disagree",
+    ),
+    Case(
+        "guard hidden behind a missing program",
+        "adversarial",
+        command="not-installed-linter --check | grep -q deny || exit 0",
+        broken=True,
+        wants=("P11.WRAPPED_COMMAND_MISSING",),
+        note="two wrapped programs, one of them absent",
+    ),
+    Case(
+        "deletes itself after the first call",
+        "adversarial",
+        files={"g.py": py(
+            "import json, os, sys\n"
+            "sys.stdin.read()\n"
+            "try:\n"
+            "    os.unlink(__file__)\n"
+            "except OSError:\n"
+            "    pass\n"
+            'print(\'{"permissionDecision": "allow"}\')\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        note="the guard that removes itself; second probe must not crash the run",
+    ),
+    Case(
+        "writes 40 MB to stdout",
+        "adversarial",
+        files={"g.py": py(
+            "import sys\n"
+            "sys.stdin.read()\n"
+            'sys.stdout.write("x" * 40_000_000)\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        note="must not take the probe down with it",
+    ),
+    Case(
+        "shebang points at itself",
+        "adversarial",
+        files={"loop.sh": "#!/bin/sh\nread -r p\necho '" + ALLOW + "'\n"},
+        executable=("loop.sh",),
+        command="{loop.sh}",
+        starts=True,
+        note="sanity anchor for the loop family",
+    ),
+    Case(
+        "unknown decision value",
+        "adversarial",
+        files={"g.py": py(
+            "import json, sys\n"
+            "sys.stdin.read()\n"
+            'print(json.dumps({"permissionDecision": "maybe"}))\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        note="a value the harness does not know",
+    ),
+    Case(
+        "decision for the wrong event name",
+        "adversarial",
+        files={"g.py": py(
+            "import json, sys\n"
+            "sys.stdin.read()\n"
+            'print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", '
+            '"permissionDecision": "deny"}}))\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        note="mismatched hookEventName",
+    ),
+    Case(
+        "empty file with an execute bit",
+        "adversarial",
+        files={"g.sh": ""},
+        executable=("g.sh",),
+        command="{g.sh}",
+        note="runs, does nothing, allows everything",
+    ),
+    Case(
+        "directory instead of a script",
+        "adversarial",
+        files={"dir/keep": "x"},
+        command="{dir}",
+        starts=False, broken=True,
+        note="a path that cannot be executed at all",
+    ),
+    Case(
+        "reads stdin twice",
+        "adversarial",
+        files={"g.py": py(
+            "import json, sys\n"
+            "first = sys.stdin.read()\n"
+            "second = sys.stdin.read()\n"
+            'print(\'{"permissionDecision": "allow"}\')\n'
+        )},
+        executable=("g.py",),
+        command="{g.py}",
+        starts=True, answers=True, broken=False,
+        note="the second read returns empty; must not hang",
+    ),
     # ------------------------------------------------------------ adversarial
     Case(
         "swallows its own failure",
         "adversarial",
         command="definitely-missing-guard 2>/dev/null || exit 0",
-        broken=False,
-        wants=("P01.NOT_TESTED",),
-        note="undetectable from outside; must say so instead of passing it",
+        broken=True,
+        wants=("P11.WRAPPED_COMMAND_MISSING",),
+        note="the run says nothing; resolving the command words says everything",
     ),
     Case(
         "valid JSON on stderr instead of stdout",
@@ -328,7 +473,9 @@ CASES: list[Case] = [
         )},
         executable=("g.py",),
         command="{g.py}",
-        note="stdout is empty; must not be read as a working decision",
+        broken=True,
+        wants=("P09.DECISION_ON_STDERR",),
+        note="stdout is empty; the verdict never reaches Claude",
     ),
     Case(
         "behaves differently when it detects the probe",
@@ -343,7 +490,8 @@ CASES: list[Case] = [
         )},
         executable=("g.py",),
         command="{g.py}",
-        note="a hook that games the probe; documents the limit",
+        wants=("P11.PAYLOAD_SENSITIVE",),
+        note="the probe hides its name, then offers a decoy that carries it",
     ),
     Case(
         "stateful: blocks only on the second call",
@@ -359,7 +507,8 @@ CASES: list[Case] = [
         )},
         executable=("g.py",),
         command="{g.py}",
-        note="the probe runs twice; state makes the second call differ",
+        wants=("P11.NONDETERMINISTIC",),
+        note="same payload twice: the hidden state becomes visible",
     ),
     Case(
         "forks a background child and exits",
@@ -502,11 +651,11 @@ def evaluate(case: Case, project: Path) -> tuple[bool, list[str]]:
 
 def main() -> int:
     verbose = "-v" in sys.argv
-    marker = Path(tempfile.gettempdir()) / "hookprobe-stress-state"
+    marker = Path(tempfile.gettempdir()) / "hookprobe-stress-state"  # noqa: E501
     if marker.exists():
         marker.unlink()
 
-    root = Path(tempfile.mkdtemp(prefix="hookprobe-stress-"))
+    root = Path(tempfile.mkdtemp(prefix="guardfixtures-"))  # must not contain the tool name
     results: list[tuple[Case, bool, list[str]]] = []
     try:
         for case in CASES:

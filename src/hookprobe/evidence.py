@@ -32,6 +32,47 @@ EVIDENCE: dict[str, Evidence] = {
     entry.code: entry
     for entry in (
         _e(
+            "P11.NONDETERMINISTIC",
+            "Same input, different answer",
+            "critical",
+            "Run twice with a byte-identical payload, this handler answered differently. A guard whose verdict depends on hidden state -- a counter, a cache, a lock file, the time -- cannot be relied on: the run that matters may be the one where it says yes.",
+            "Make the decision a function of the payload alone, or move the state into a place where its effect is visible and testable.",
+            "docs:decision-control",
+        ),
+        _e(
+            "P11.PAYLOAD_SENSITIVE",
+            "Answer depends on fields it should not read",
+            "warning",
+            "Two payloads that differ only in session id, working directory or timestamp produced different verdicts. Either the handler inspects those fields deliberately, or it is reacting to something it was not meant to see -- including the probe itself.",
+            "Base the decision on tool name and tool input; if session or cwd genuinely matter, say so in the handler and expect the probe to report it.",
+            "docs:hook-input",
+        ),
+        _e(
+            "P11.WRAPPED_COMMAND_MISSING",
+            "The wrapped command does not exist",
+            "critical",
+            "The handler is a shell construct that hides its own failure -- the pattern `cmd 2>/dev/null || exit 0` exits cleanly whether or not cmd exists. Resolving the words of the command line shows that the program it wraps is not on PATH and not on disk, so nothing is guarding anything.",
+            "Install the missing program, correct the path, or drop the fallback so the failure becomes visible.",
+            "anthropics/claude-code#32990",
+            "docs:hook-cannot-start",
+        ),
+        _e(
+            "P09.DECISION_ON_STDERR",
+            "Decision-shaped output on the wrong stream",
+            "critical",
+            "The handler wrote a JSON object that looks like a decision to stderr while stdout stayed empty. Claude Code reads decisions from stdout only; stderr is shown as a blocking message or written to the debug log, so this verdict never arrives.",
+            "Write the JSON object to stdout and keep stderr for human-readable reasons.",
+            "docs:json-output",
+        ),
+        _e(
+            "P08.CONTRADICTORY_DECISION",
+            "Exit code and payload disagree",
+            "warning",
+            "The handler exits 2, which blocks, while its JSON says allow -- or the reverse. The exit code wins, so the written decision is misleading to everyone who reads the source later.",
+            "Return one signal: either exit 2 with no decision payload, or exit 0 with an explicit decision.",
+            "docs:decision-control",
+        ),
+        _e(
             "P08.ASYNC_CANNOT_BLOCK",
             "Async handler cannot block",
             "critical",
