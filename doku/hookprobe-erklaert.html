@@ -1,0 +1,233 @@
+<meta charset="utf-8">
+<title>hookprobe — wie es funktioniert</title>
+<style>
+@page { size: A4; margin: 18mm 16mm 16mm 16mm; }
+:root{ --ink:#16201d; --ink2:#4a5551; --ink3:#7b8480; --line:#d9ded9; --accent:#1c5cab; --warn:#8a4b00; --crit:#93231f; --ok:#175f38; --soft:#f2f5f1; }
+*{box-sizing:border-box}
+body{ font-family:"Source Sans 3","Helvetica Neue",Helvetica,Arial,sans-serif; color:var(--ink); font-size:10.5pt; line-height:1.5; margin:0; }
+h1{ font-size:27pt; line-height:1.1; margin:0 0 6pt; letter-spacing:-.4pt; }
+h2{ font-size:15pt; margin:0 0 8pt; padding-bottom:4pt; border-bottom:1.6pt solid var(--ink); break-after:avoid; }
+h3{ font-size:11.5pt; margin:14pt 0 4pt; break-after:avoid; }
+p{ margin:6pt 0; max-width:none; }
+ul,ol{ margin:6pt 0; padding-left:15pt; } li{ margin:3pt 0; }
+code,.mono{ font-family:"JetBrains Mono",Menlo,Consolas,monospace; font-size:9pt; }
+section{ break-before:page; padding-top:2pt; }
+section.first{ break-before:auto; }
+.lede{ font-size:12pt; color:var(--ink2); margin:8pt 0 0; }
+.meta{ font-size:8.5pt; color:var(--ink3); margin-top:10pt; }
+.eyebrow{ font-size:8pt; letter-spacing:1.4pt; text-transform:uppercase; color:var(--ink3); font-weight:700; }
+.einfach{ background:var(--soft); border-left:3pt solid #7fa88f; padding:8pt 11pt; margin:9pt 0; break-inside:avoid; }
+.einfach .eyebrow{ color:#4f7f60; }
+.tech{ border-left:3pt solid var(--accent); padding:8pt 11pt; margin:9pt 0; background:#f4f7fc; break-inside:avoid; }
+.tech .eyebrow{ color:var(--accent); }
+.warn{ border-left:3pt solid #c98500; background:#fdf6ea; padding:8pt 11pt; margin:9pt 0; break-inside:avoid; }
+table{ border-collapse:collapse; width:100%; font-size:8.8pt; margin:8pt 0; break-inside:avoid; }
+th{ background:#eceeec; text-align:left; padding:4pt 6pt; border-bottom:1pt solid var(--line); font-weight:700; }
+td{ padding:4pt 6pt; border-bottom:.5pt solid var(--line); vertical-align:top; }
+tr:last-child td{ border-bottom:0; }
+td.n{ text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+pre{ background:#f6f7f5; border:.5pt solid var(--line); border-radius:3pt; padding:8pt 10pt; font-family:"JetBrains Mono",Menlo,Consolas,monospace; font-size:8.4pt; line-height:1.45; overflow:hidden; white-space:pre-wrap; break-inside:avoid; margin:7pt 0; }
+pre b{ color:var(--crit); font-weight:700; }
+pre i{ color:var(--ok); font-style:normal; font-weight:700; }
+blockquote{ margin:6pt 0; padding-left:9pt; border-left:2pt solid var(--line); color:var(--ink2); font-size:9.5pt; }
+blockquote cite{ display:block; font-style:normal; font-size:8pt; color:var(--ink3); margin-top:2pt; }
+.cols{ display:grid; grid-template-columns:1fr 1fr; gap:11pt; }
+.card{ border:.6pt solid var(--line); border-radius:3pt; padding:8pt 10pt; break-inside:avoid; }
+.card h4{ margin:0 0 4pt; font-size:10pt; }
+.card p{ font-size:9.2pt; margin:4pt 0; }
+figure{ margin:10pt 0; break-inside:avoid; text-align:center; }
+figcaption{ font-size:8.2pt; color:var(--ink3); margin-top:4pt; }
+.tag{ display:inline-block; font-size:7.6pt; font-weight:700; padding:1pt 5pt; border-radius:8pt; vertical-align:1pt; }
+.tag-crit{ background:#fbe6e4; color:var(--crit); } .tag-ok{ background:#e4f2e9; color:var(--ok); } .tag-warn{ background:#fdf0dc; color:var(--warn); }
+.foot{ font-size:8pt; color:var(--ink3); border-top:.5pt solid var(--line); padding-top:5pt; margin-top:14pt; }
+</style>
+
+<section class="first">
+<div class="eyebrow">Werkzeug-Dokumentation · Stand 22. September 2026</div>
+<h1>hookprobe</h1>
+<p class="lede">Ein Prüfwerkzeug, das feststellt, ob die Schutz-Hooks von Claude Code <em>tatsächlich wirken</em> — und nicht nur ordentlich konfiguriert sind. Dieses Dokument erklärt zuerst das Problem, dann die Funktionsweise, dann die Grenzen.</p>
+<p class="meta">Grundlage: 57 dokumentierte Fehlerfälle aus dem Issue-Verlauf von <span class="mono">anthropics/claude-code</span>, jeder mit Nummer, Status und wörtlichem Zitat geprüft · Hook-Dokumentation im Wortlaut · Konkurrenzprüfung über sieben Werkzeugkategorien</p>
+
+<h2 style="margin-top:16pt">Das Problem in einem Satz</h2>
+<blockquote>„Configured and effective are different properties, and only the first is observable today.“<cite>anthropics/claude-code #82323, offen</cite></blockquote>
+
+<div class="einfach"><div class="eyebrow">Einfach gesagt — die Alarmanlage</div>
+<p>Stell dir vor, du baust eine Alarmanlage: „Wenn die Haustür aufgeht, schlage Alarm.“ Die vorhandenen Werkzeuge schauen auf deine Konfiguration und sagen: <em>Der Satz steht da, die Anlage ist grün.</em> Sie prüfen aber nicht, ob das Kabel zur Tür eingesteckt ist.</p>
+<p>hookprobe macht etwas anderes: Es reißt die Tür einmal auf und schaut, ob es piept. Wenn nicht, sagt es dir: <strong>„Die Anlage ist eingeschaltet, aber das Kabel ist ab.“</strong></p>
+</div>
+
+<div class="tech"><div class="eyebrow">Technisch</div>
+<p>Hooks sind externe Programme, die Claude Code an definierten Punkten aufruft — etwa vor jedem Werkzeugaufruf (<span class="mono">PreToolUse</span>). Sie sind der Ort, an dem Berechtigungen durchgesetzt werden, weil ein Sprachmodell selbst kein Berechtigungssystem ist. Ob ein konfigurierter Hook aber startet, antwortet und ob sein Verdikt den Aufruf verändert, ist aus der Konfiguration <em>nicht</em> ableitbar. Genau diese drei Eigenschaften misst hookprobe getrennt.</p>
+</div>
+
+<h3>Warum das gefährlich ist: fail open</h3>
+<p>Wenn ein Hook nicht startet, bricht Claude Code den Vorgang <strong>nicht</strong> ab — es macht weiter. Das ist kein Fehler, sondern dokumentiertes Verhalten:</p>
+<blockquote>„Claude Code treats exit code 1 as a non-blocking error and proceeds with the action.“ … „a mistyped path in settings.json leaves the gate silently disabled.“<cite>Hook-Dokumentation von Claude Code</cite></blockquote>
+<p>Ein kaputter Wächter ist damit gefährlicher als gar keiner: Ohne Wächter weißt du, dass du ungeschützt bist. Mit einem stillen Wächter glaubst du, geschützt zu sein. In einem gemeldeten Fall blieben <strong>6 865 Fehlstarts eines Hooks in einer einzigen Sitzung</strong> unbemerkt (#81458).</p>
+</section>
+
+<section>
+<h2>Was ein Hook ist — und wo er sitzt</h2>
+<div class="einfach"><div class="eyebrow">Einfach gesagt — der Geldautomat</div>
+<p>Ein Programm läuft normalerweise stur von oben nach unten. Ein Hook ist eine eingebaute Pause, in der das System kurz anhält und einen Wächter fragt: <em>Darf ich das?</em></p>
+<p>Am Geldautomaten wären das zwei Stellen: <strong>vor</strong> der Auszahlung („Ist die Karte gesperrt?“) und <strong>nach</strong> der Auszahlung („Buche ab und schreib es ins Protokoll“). Bei Claude Code heißen diese Stellen <span class="mono">PreToolUse</span> und <span class="mono">PostToolUse</span>.</p>
+</div>
+<p>Der entscheidende Punkt: Der Wächter ist ein eigenes Programm auf deiner Platte. Zwischen „in der Konfiguration eingetragen“ und „läuft wirklich“ liegen mehrere Stellen, an denen es stillschweigend scheitern kann — und genau die sind der Gegenstand dieses Werkzeugs.</p>
+
+<figure>
+<svg viewBox="0 0 640 210" width="100%" height="190" role="img" aria-label="Ablauf: Modell schlägt vor, Hook entscheidet, Aktion wird ausgeführt oder blockiert">
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#4a5551"/></marker></defs>
+  <rect x="6" y="66" width="120" height="46" rx="5" fill="#eaf1fb" stroke="#1c5cab" stroke-width="1.2"/>
+  <text x="66" y="86" text-anchor="middle" font-size="11" fill="#16201d" font-family="sans-serif">Modell</text>
+  <text x="66" y="101" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">schlägt Aktion vor</text>
+  <line x1="128" y1="89" x2="184" y2="89" stroke="#4a5551" stroke-width="1.2" marker-end="url(#a)"/>
+  <rect x="186" y="56" width="140" height="66" rx="5" fill="#fdf0dc" stroke="#c98500" stroke-width="1.2"/>
+  <text x="256" y="78" text-anchor="middle" font-size="11" fill="#16201d" font-family="sans-serif">Hook (PreToolUse)</text>
+  <text x="256" y="93" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">externes Programm</text>
+  <text x="256" y="107" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">entscheidet erlauben/ablehnen</text>
+  <line x1="328" y1="78" x2="392" y2="52" stroke="#175f38" stroke-width="1.2" marker-end="url(#a)"/>
+  <text x="352" y="60" font-size="8" fill="#175f38" font-family="sans-serif">Exit 2</text>
+  <rect x="394" y="28" width="150" height="42" rx="5" fill="#e4f2e9" stroke="#175f38" stroke-width="1.2"/>
+  <text x="469" y="46" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">blockiert</text>
+  <text x="469" y="60" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">Aktion findet nicht statt</text>
+  <line x1="328" y1="100" x2="392" y2="126" stroke="#4a5551" stroke-width="1.2" marker-end="url(#a)"/>
+  <text x="340" y="122" font-size="8" fill="#4a5551" font-family="sans-serif">Exit 0</text>
+  <rect x="394" y="106" width="150" height="42" rx="5" fill="#f6f7f5" stroke="#d9ded9" stroke-width="1.2"/>
+  <text x="469" y="124" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">wird ausgeführt</text>
+  <text x="469" y="138" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">normaler Weg</text>
+  <path d="M256,124 C256,168 420,168 420,168" fill="none" stroke="#93231f" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#a)"/>
+  <rect x="394" y="158" width="238" height="40" rx="5" fill="#fbe6e4" stroke="#93231f" stroke-width="1.2"/>
+  <text x="513" y="174" text-anchor="middle" font-size="10.5" fill="#93231f" font-family="sans-serif" font-weight="bold">startet nicht → wird ausgeführt</text>
+  <text x="513" y="188" text-anchor="middle" font-size="8.5" fill="#93231f" font-family="sans-serif">fail open · keine Fehlermeldung</text>
+</svg>
+<figcaption>Der gestrichelte rote Pfad ist der gefährliche: Der Hook startet gar nicht — und die Aktion läuft trotzdem durch, ohne jede Meldung.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Was hookprobe prüft</h2>
+<p>Zehn Prüfungen, jede aus einem dokumentierten Fehlerfall abgeleitet. Die Spalte „Lauf nötig“ sagt, ob die Prüfung ohne echte Sitzung auskommt — das ist der Unterschied zwischen kostenlos und token-pflichtig.</p>
+<table>
+<thead><tr><th>Nr.</th><th>Prüfung</th><th>Was schiefgeht</th><th>Lauf nötig</th><th>Beleg</th></tr></thead>
+<tbody>
+<tr><td class="n">P01</td><td><strong>Startet das Kommando?</strong></td><td>Fehlendes Ausführungsrecht, falscher Pfad, fehlender Interpreter, Leerzeichen im Pfad — der Hook startet nie, die Aktion läuft durch</td><td>nein</td><td>#94362, #32990, #39478</td></tr>
+<tr><td class="n">P08</td><td>Exit-Code-Semantik</td><td>Nur Exit 2 blockiert. Ein Ablehnungs-Hook mit <span class="mono">exit 1</span> blockiert nie</td><td>nein</td><td>Doku</td></tr>
+<tr><td class="n">P03</td><td>Werden Hooks überhaupt geladen?</td><td>Ein einziger schemawidriger Matcher schaltet <strong>alle</strong> Hooks der Datei ab</td><td>nein</td><td>#75071</td></tr>
+<tr><td class="n">P04</td><td>Trifft der Matcher?</td><td>Zehn Ereignisse unterstützen gar keinen Matcher — dort ist er wirkungslos</td><td>nein</td><td>Doku</td></tr>
+<tr><td class="n">P09</td><td>JSON-Form der Antwort</td><td>Begrüßungstext aus dem Shell-Profil im stdout zerstört die Auswertung</td><td>nein</td><td>Doku, #95354</td></tr>
+<tr><td class="n">P07</td><td>Ausgabekappung</td><td>Über 10 000 Zeichen wird ausgelagert — und Claude liest die Datei nicht</td><td>nein</td><td>#94358, Doku</td></tr>
+<tr><td class="n">P10</td><td>Timeout</td><td>Hook wartet auf stdin und läuft ins Timeout; ein solcher PreToolUse-Hook blockiert dann <em>nicht</em></td><td>nein</td><td>Doku</td></tr>
+<tr><td class="n">P05</td><td>Ablageort</td><td>Hook im Agent-Frontmatter tot, <span class="mono">once:true</span> im Skill wirkungslos, Desktop-Tab feuert nie</td><td>teilweise</td><td>#95650, #95280, #95833</td></tr>
+<tr><td class="n">P02</td><td><strong>Schlägt die Ablehnung durch?</strong></td><td>Der Hook feuert, aber sein Verdikt verändert den Aufruf nicht</td><td><strong>ja</strong></td><td>15 Fälle</td></tr>
+<tr><td class="n">P06</td><td>Betriebsart</td><td>Headless verhält sich anders als interaktiv — „ask“ wird still zu „deny“</td><td><strong>ja</strong></td><td>#95726</td></tr>
+</tbody></table>
+
+<div class="warn"><strong>Der wichtigste Befund für die Bauweise.</strong> hookprobe darf sich nicht darauf verlassen, dass der Harness meldet, ob ein Hook gefeuert hat. Über 36 Messläufe zeigt #94275: <span class="mono">hook_started</span> und <span class="mono">hook_response</span> erscheinen im Ereignisstrom <strong>nur für SessionStart</strong>. Die Wirksamkeit wird deshalb an <em>Nebenwirkungen</em> gemessen — an einer Spur, die der Hook selbst hinterlässt.</div>
+</section>
+
+<section>
+<h2>Wie es arbeitet</h2>
+<h3>Stufe 1 — der Standardlauf: offline, kostenlos, deterministisch</h3>
+<p>hookprobe liest alle Quellen der Hook-Konfiguration, führt jeden Hook-Befehl genau so aus, wie der Harness es täte — gleiche Shell-Semantik, gleiches Arbeitsverzeichnis, ein realistisches Eingabeobjekt auf stdin — und beobachtet, was passiert. Kein Netz, kein Schlüssel, keine Tokens.</p>
+<div class="cols">
+<div class="card"><h4>Was dabei gemessen wird</h4><p>Startet der Prozess überhaupt? Mit welchem Exit-Code endet er? Ist die Ausgabe ein gültiges JSON-Objekt? Wie lange dauert er? Wie lang ist seine Antwort?</p></div>
+<div class="card"><h4>Warum das reicht</h4><p>Die häufigste und gefährlichste Fehlerklasse — der Hook startet nicht — ist damit vollständig abgedeckt. Elf der 57 belegten Fälle fallen in diese Klasse, und sie brauchen keinen einzigen Token.</p></div>
+</div>
+
+<h3>Stufe 2 — <span class="mono">--live</span>: die Wirksamkeitsmessung</h3>
+<p>Die Frage „hat das Verdikt den Aufruf wirklich verändert?“ lässt sich nur mit einem echten Lauf beantworten. hookprobe legt dafür ein leeres Wegwerfverzeichnis an und führt <strong>zwei</strong> Läufe aus:</p>
+<figure>
+<svg viewBox="0 0 640 150" width="100%" height="140" role="img" aria-label="Differenzmessung: Lauf mit Hooks gegen Kontrolllauf ohne Hooks">
+  <defs><marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#4a5551"/></marker></defs>
+  <rect x="6" y="52" width="150" height="46" rx="5" fill="#f6f7f5" stroke="#d9ded9" stroke-width="1.2"/>
+  <text x="81" y="71" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Kanarien-Aufgabe</text>
+  <text x="81" y="86" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">harmlos, eindeutig markiert</text>
+  <line x1="158" y1="66" x2="214" y2="40" stroke="#4a5551" stroke-width="1.2" marker-end="url(#b)"/>
+  <line x1="158" y1="84" x2="214" y2="110" stroke="#4a5551" stroke-width="1.2" marker-end="url(#b)"/>
+  <rect x="216" y="18" width="180" height="42" rx="5" fill="#fdf0dc" stroke="#c98500" stroke-width="1.2"/>
+  <text x="306" y="36" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Lauf A — mit deinen Hooks</text>
+  <text x="306" y="50" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">Nebenwirkung darf NICHT entstehen</text>
+  <rect x="216" y="90" width="180" height="42" rx="5" fill="#eaf1fb" stroke="#1c5cab" stroke-width="1.2"/>
+  <text x="306" y="108" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Lauf B — Kontrolle, ohne Hooks</text>
+  <text x="306" y="122" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">Nebenwirkung MUSS entstehen</text>
+  <line x1="398" y1="40" x2="452" y2="66" stroke="#4a5551" stroke-width="1.2" marker-end="url(#b)"/>
+  <line x1="398" y1="110" x2="452" y2="84" stroke="#4a5551" stroke-width="1.2" marker-end="url(#b)"/>
+  <rect x="454" y="52" width="180" height="46" rx="5" fill="#e4f2e9" stroke="#175f38" stroke-width="1.2"/>
+  <text x="544" y="71" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Differenz = Wirksamkeit</text>
+  <text x="544" y="86" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">kein Unterschied → Hook wirkt nicht</text>
+</svg>
+<figcaption>Nur der Vergleich beweist die Wirkung. Ein Lauf allein kann nicht unterscheiden, ob der Hook blockiert hat oder ob das Modell die Aktion gar nicht erst versucht hat.</figcaption>
+</figure>
+<p>Entsteht die Nebenwirkung in beiden Läufen, hat der Hook nichts bewirkt. Entsteht sie in keinem, war die Aufgabe untauglich — auch das meldet hookprobe, statt ein falsches Grün zu zeigen.</p>
+<div class="warn"><span class="mono">--live</span> verbraucht zwei echte Sitzungen und muss ausdrücklich angefordert werden. Ohne die Angabe läuft nur Stufe 1.</div>
+</section>
+
+<section>
+<h2>Die Ausgabe lesen</h2>
+<p class="eyebrow">Echter Lauf vom 23.09.2026 gegen eine Testkonfiguration mit drei Hooks</p>
+<pre>$ hookprobe --no-home
+
+Hook                       source   starts  answers  can block
+--------------------------------------------------------------
+PreToolUse · guard.sh      project  yes     yes      yes
+PreToolUse · deny-rm.py    project  yes     <b>no</b>       untested
+SessionStart · context.py  project  yes     yes      n/a
+
+<b>2 of 3 hooks are not protecting anything.</b>
+
+  deny-rm.py
+      deny-rm.py has <b>no execute bit</b> -- the gate is silently disabled.
+      chmod +x /private/tmp/hp-demo2/.claude/hooks/deny-rm.py
+      fix: Run chmod +x &lt;path&gt; and preserve the executable bit in version control and packaging.
+      evidence: anthropics/claude-code#94362, docs:hook-cannot-start
+
+  deny-rm.py
+      No rejection observed for a payload that should be refused.
+      Either the hook allows it on purpose, or it never rejects anything.
+      fix: Test the intended rejection payload and make its rejection path return exit 2 or valid blocking JSON.
+      evidence: docs:decision-control
+
+  context.py
+      additionalContext is 14,208 characters -- <b>above the 10,000 cap</b>.
+      Everything past the cap is written to a file that Claude is not asked to read.
+      fix: Reduce each emitted context field below 10,000 characters and put essential material in the first 2,000.
+      evidence: anthropics/claude-code#94358, anthropics/claude-code#84021, anthropics/claude-code#70460, docs:output-cap
+
+Effectiveness (did the verdict change the call?) was not measured.
+Run with --live to check it against a real session.
+
+A probe proves the moment of the test, not the future: time-dependent failures, state changes after the run and concurrency stay out of reach.</pre>
+<p>Zwei Dinge sind an dieser Ausgabe wichtig. Erstens steht in der Kopfzeile nicht „konfiguriert“, sondern <em>startet / antwortet / kann blockieren</em> — drei getrennte Eigenschaften. Zweitens steht unter jedem Fund die Ursache <strong>und</strong> die Reparatur, dazu die Belegnummer, unter der das Fehlerbild dokumentiert ist.</p>
+<p>Der Exit-Code ist 1, sobald mindestens ein Hook als wirkungslos erkannt wurde. Damit lässt sich hookprobe vor den Start des eigentlichen Werkzeugs hängen: Fällt eine Schutzwand, beginnt die Sitzung gar nicht erst.</p>
+</section>
+
+<section>
+<h2>Was es nicht kann</h2>
+<p>Ein Prüflauf beweist den Moment des Tests, nicht die Zukunft. Diese Fehlerbilder bleiben außerhalb der Reichweite — alle sind belegt, und sie gehören zur ehrlichen Beschreibung des Werkzeugs:</p>
+<table>
+<thead><tr><th>Grenze</th><th>Warum</th><th>Beleg</th></tr></thead>
+<tbody>
+<tr><td>Zeitabhängige Ausfälle</td><td>Ein Hook kann stundenlang laufen und dann aufhören — etwa weil sein Protokoll auf 48 GB angewachsen ist</td><td>#16047, #76322</td></tr>
+<tr><td>Zustandswechsel nach dem Test</td><td>Ein einziger Verzeichniswechsel beendet den Datei-Beobachter für den Rest der Sitzung</td><td>#95440</td></tr>
+<tr><td>Nebenläufigkeit</td><td>Mehrere Sitzungen gleichzeitig überschreiben einander die Konfiguration</td><td>#95474</td></tr>
+<tr><td>Selbstabschaffung</td><td>Der Agent löscht die Hook-Datei, die ihn bändigen soll</td><td>#32990</td></tr>
+<tr><td>Aussetzer</td><td>Hooks fielen 30 Minuten aus und kamen von selbst wieder</td><td>#90296</td></tr>
+<tr><td>Fremde Umgebung</td><td>hookprobe misst seine eigene Umgebung — der Ablageort der Konfiguration entscheidet mit</td><td>#85613</td></tr>
+</tbody></table>
+<p>Daraus folgt die ehrliche Empfehlung: hookprobe ist ein Thermometer, keine Medizin. Es gehört <strong>vor jeden Start</strong>, nicht einmal im Monat.</p>
+
+<h2 style="margin-top:16pt">Abgrenzung zu vorhandenen Werkzeugen</h2>
+<p>Drei Werkzeuge tragen einen ähnlichen Namen, keines misst die Wirksamkeit. Stand 22.09.2026, alle MIT-lizenziert, alle ohne nennenswerte Verbreitung.</p>
+<table>
+<thead><tr><th>Werkzeug</th><th>Was es tut</th><th>startet?</th><th>antwortet?</th><th>wirksam?</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">kVadrum/hookprobe</span></td><td>führt Hooks mit synthetischen Eingaben aus</td><td><span class="tag tag-warn">Mock</span></td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-crit">nein</span></td></tr>
+<tr><td><span class="mono">drakeo338/hookprobe</span></td><td>statischer Konfigurations-Linter, ohne Netz</td><td><span class="tag tag-crit">nein</span></td><td><span class="tag tag-crit">nein</span></td><td><span class="tag tag-crit">nein</span></td></tr>
+<tr><td><span class="mono">Tomdachs/agent-hook-probe</span></td><td>Wegwerf-Verzeichnisse gegen echte Laufzeiten</td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-crit">nein</span></td></tr>
+<tr><td>Anthropic <span class="mono">test-hook.sh</span></td><td>„Tests a hook with sample input“ — wertet den Matcher nie aus</td><td><span class="tag tag-warn">Mock</span></td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-crit">nein</span></td></tr>
+<tr><td><span class="mono">/hooks</span> (Bordmittel)</td><td>„a read-only browser for your configured hooks“</td><td><span class="tag tag-crit">nein</span></td><td><span class="tag tag-crit">nein</span></td><td><span class="tag tag-crit">nein</span></td></tr>
+<tr><td><strong>hookprobe</strong></td><td>Ausführung wie der Harness + Differenzmessung</td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-ok">ja</span></td><td><span class="tag tag-ok">ja</span></td></tr>
+</tbody></table>
+
+<div class="foot">hookprobe · Dokumentation vom 22.09.2026 · Alle Issue-Nummern beziehen sich auf <span class="mono">github.com/anthropics/claude-code</span> und wurden einzeln auf Titel, Status und Inhalt geprüft. Zwei Hinweise zur Belegqualität: In #95354 hat der Melder einen Teil seiner Analyse selbst zurückgezogen, und #16047 („hört nach 2,5 Stunden auf“) war kein Fehler des Harness, sondern ein auf 48 GB angewachsenes Protokoll. Beide Fälle stützen das Werkzeug trotzdem — der erste als Beobachtbarkeitsproblem, der zweite als Grenze.</div>
+</section>

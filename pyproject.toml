@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hookprobe"
+version = "0.1.0"
+description = "Check whether your Claude Code hooks actually do anything."
+authors = [
+  { name = "Jason" },
+]
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["claude-code", "hooks", "security", "fail-open"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+hookprobe = "hookprobe.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hookprobe"]
