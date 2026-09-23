@@ -23,20 +23,43 @@ and **could it block** — the three properties you cannot read off a config fil
 ## Example
 
 ```
-$ hookprobe
+$ hookprobe --no-home
 
-Hook                     source   starts  answers  can block
-------------------------------------------------------------
-PreToolUse · guard.sh    project  yes     yes      yes
-PreToolUse · deny-rm.py  project  yes     no       no
-UserPromptSubmit · note  user     yes     yes      n/a
+Hook                       source   starts  answers  can block
+--------------------------------------------------------------
+PreToolUse · guard.sh      project  yes     yes      yes
+PreToolUse · deny-rm.py    project  yes     no       untested
+SessionStart · context.py  project  yes     yes      n/a
 
-1 of 3 hooks is not protecting anything.
+2 of 3 hooks are not protecting anything.
 
   deny-rm.py
       deny-rm.py has no execute bit -- the gate is silently disabled.
       fix: Run chmod +x <path> and preserve the executable bit in version control.
       evidence: anthropics/claude-code#94362, docs:hook-cannot-start
+
+  context.py
+      additionalContext is 14,208 characters -- above the 10,000 cap.
+      Everything past the cap is written to a file that Claude is not asked to read.
+      evidence: anthropics/claude-code#94358, docs:output-cap
+```
+
+With `--live` the channel itself is measured as well:
+
+```
+$ hookprobe --no-home --live
+
+The canary was created only without the hook: a deny verdict takes effect in
+this channel (guarded run exit 0).
+
+Hook                       source   starts  answers  can block  effective
+-------------------------------------------------------------------------
+PreToolUse · guard.sh      project  yes     yes      yes        yes
+PreToolUse · deny-rm.py    project  yes     no       untested   n/a
+SessionStart · context.py  project  yes     yes      n/a        n/a
+
+Channel check: a deny verdict does take effect here -- measured against two
+disposable sessions.
 ```
 
 Exit code is `1` as soon as one hook is ineffective, so you can put it in front of your session:
@@ -75,16 +98,21 @@ sessions, and it asks before it does.
 ## How `--live` works
 
 Effectiveness cannot be read from a single run — you cannot tell "the hook blocked it" from
-"the model never tried". So `hookprobe --live` runs a canary task twice in a throwaway
-directory:
+"the model never tried". And it makes no sense to ask whether *your* hooks block a harmless
+canary: they are supposed to let it through. So `hookprobe --live` installs a known-good deny
+hook of its own and runs a canary task twice in a throwaway directory:
 
 ```
-run A  with your hooks      -> the side effect must NOT appear
-run B  without hooks        -> the side effect MUST appear
+run A  with hookprobe's deny hook   -> the side effect must NOT appear
+run B  without any hook (control)   -> the side effect MUST appear
 ```
 
-Only the difference proves the verdict took effect. If the side effect appears in neither run,
-the canary task itself failed and `hookprobe` says so instead of reporting a false green.
+That measures the property you cannot see otherwise: **does a deny verdict take effect in this
+channel at all?** If the canary appears in both runs, the mechanism is not enforcing anything
+here and every verdict your own hooks return is decoration — the failure mode reported in
+[#95726], where "ask" silently becomes "deny" in `--print` mode. If it appears in neither run,
+the canary task itself failed and `hookprobe` says inconclusive instead of reporting a false
+green.
 
 It measures **side effects, not harness events** on purpose: measured over 36 `claude -p` runs
 in [anthropics/claude-code#94275], `hook_started` and `hook_response` appear in the stream only
@@ -145,3 +173,4 @@ MIT
 [#32990]: https://github.com/anthropics/claude-code/issues/32990
 [#90296]: https://github.com/anthropics/claude-code/issues/90296
 [#85613]: https://github.com/anthropics/claude-code/issues/85613
+[#95726]: https://github.com/anthropics/claude-code/issues/95726

@@ -73,6 +73,7 @@ def render_text(
     probes: list[HookProbe],
     schema_findings: list[Finding],
     live_ran: bool = False,
+    channel_verdict: bool | None = None,
 ) -> str:
     """The human-facing report."""
     from . import evidence
@@ -153,7 +154,20 @@ def render_text(
             out.append(f"  {_short(probe.hook)}: {finding.message}")
         out.append("")
 
-    if not live_ran:
+    if live_ran:
+        if channel_verdict is True:
+            out.append(
+                "Channel check: a deny verdict does take effect here -- measured "
+                "against two disposable sessions."
+            )
+        elif channel_verdict is False:
+            out.append(
+                "Channel check: a deny verdict did NOT take effect here. Every "
+                "verdict your hooks return is decoration in this channel."
+            )
+        else:
+            out.append("Channel check: inconclusive, see the message above.")
+    else:
         out.append(
             "Effectiveness (did the verdict change the call?) was not measured."
         )

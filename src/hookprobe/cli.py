@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         probes.append(probe)
 
     live_ran = False
+    channel_verdict: bool | None = None
     if args.live:
         if not args.yes and sys.stdin.isatty():
             print(
@@ -106,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         live_ran = result.ran
         if result.ran:
             live_stage.apply(probes, result)
+            channel_verdict = result.effective
         print(result.detail, file=sys.stderr)
 
     if args.explain:
@@ -118,7 +120,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         sys.stdout.write(
-            report_module.render_text(config, probes, schema_findings, live_ran)
+            report_module.render_text(
+                config, probes, schema_findings, live_ran, channel_verdict
+            )
         )
 
     broken = any(probe.is_broken for probe in probes)

@@ -135,7 +135,7 @@ figcaption{ font-size:8.2pt; color:var(--ink3); margin-top:4pt; }
 </div>
 
 <h3>Stufe 2 — <span class="mono">--live</span>: die Wirksamkeitsmessung</h3>
-<p>Die Frage „hat das Verdikt den Aufruf wirklich verändert?“ lässt sich nur mit einem echten Lauf beantworten. hookprobe legt dafür ein leeres Wegwerfverzeichnis an und führt <strong>zwei</strong> Läufe aus:</p>
+<p>Die Frage „hat das Verdikt den Aufruf wirklich verändert?“ lässt sich nur mit einem echten Lauf beantworten. Dabei wird <em>nicht</em> geprüft, ob deine eigenen Hooks den Kanarienvogel blockieren — die sollen ihn ja durchlassen. hookprobe stellt stattdessen einen eigenen, bekannt funktionierenden Ablehnungs-Hook daneben und führt in einem leeren Wegwerfverzeichnis <strong>zwei</strong> Läufe aus:</p>
 <figure>
 <svg viewBox="0 0 640 150" width="100%" height="140" role="img" aria-label="Differenzmessung: Lauf mit Hooks gegen Kontrolllauf ohne Hooks">
   <defs><marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#4a5551"/></marker></defs>
@@ -145,7 +145,7 @@ figcaption{ font-size:8.2pt; color:var(--ink3); margin-top:4pt; }
   <line x1="158" y1="66" x2="214" y2="40" stroke="#4a5551" stroke-width="1.2" marker-end="url(#b)"/>
   <line x1="158" y1="84" x2="214" y2="110" stroke="#4a5551" stroke-width="1.2" marker-end="url(#b)"/>
   <rect x="216" y="18" width="180" height="42" rx="5" fill="#fdf0dc" stroke="#c98500" stroke-width="1.2"/>
-  <text x="306" y="36" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Lauf A — mit deinen Hooks</text>
+  <text x="306" y="36" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Lauf A — mit Ablehnungs-Hook</text>
   <text x="306" y="50" text-anchor="middle" font-size="8.5" fill="#4a5551" font-family="sans-serif">Nebenwirkung darf NICHT entstehen</text>
   <rect x="216" y="90" width="180" height="42" rx="5" fill="#eaf1fb" stroke="#1c5cab" stroke-width="1.2"/>
   <text x="306" y="108" text-anchor="middle" font-size="10.5" fill="#16201d" font-family="sans-serif">Lauf B — Kontrolle, ohne Hooks</text>
@@ -158,20 +158,22 @@ figcaption{ font-size:8.2pt; color:var(--ink3); margin-top:4pt; }
 </svg>
 <figcaption>Nur der Vergleich beweist die Wirkung. Ein Lauf allein kann nicht unterscheiden, ob der Hook blockiert hat oder ob das Modell die Aktion gar nicht erst versucht hat.</figcaption>
 </figure>
-<p>Entsteht die Nebenwirkung in beiden Läufen, hat der Hook nichts bewirkt. Entsteht sie in keinem, war die Aufgabe untauglich — auch das meldet hookprobe, statt ein falsches Grün zu zeigen.</p>
+<p>Entsteht die Nebenwirkung in beiden Läufen, greift die Hook-Mechanik in diesem Kanal überhaupt nicht — dann ist jedes Verdikt deiner eigenen Hooks Dekoration. Entsteht sie in keinem, war die Aufgabe untauglich — auch das meldet hookprobe, statt ein falsches Grün zu zeigen.</p>
 <div class="warn"><span class="mono">--live</span> verbraucht zwei echte Sitzungen und muss ausdrücklich angefordert werden. Ohne die Angabe läuft nur Stufe 1.</div>
 </section>
 
 <section>
 <h2>Die Ausgabe lesen</h2>
-<p class="eyebrow">Echter Lauf vom 23.09.2026 gegen eine Testkonfiguration mit drei Hooks</p>
-<pre>$ hookprobe --no-home
+<p class="eyebrow">Echter Lauf vom 23.09.2026 mit --live gegen eine Testkonfiguration mit drei Hooks</p>
+<pre>$ hookprobe --no-home --live
 
-Hook                       source   starts  answers  can block
---------------------------------------------------------------
-PreToolUse · guard.sh      project  yes     yes      yes
-PreToolUse · deny-rm.py    project  yes     <b>no</b>       untested
-SessionStart · context.py  project  yes     yes      n/a
+The canary was created only without the hook: a deny verdict takes effect in this channel (guarded run exit 0). Checked outside /private/tmp/hp-demo2, in a disposable directory.
+
+Hook                       source   starts  answers  can block  effective
+-------------------------------------------------------------------------
+PreToolUse · guard.sh      project  yes     yes      yes        yes
+PreToolUse · deny-rm.py    project  yes     <b>no</b>       untested   n/a
+SessionStart · context.py  project  yes     yes      n/a        n/a
 
 <b>2 of 3 hooks are not protecting anything.</b>
 
@@ -193,8 +195,7 @@ SessionStart · context.py  project  yes     yes      n/a
       fix: Reduce each emitted context field below 10,000 characters and put essential material in the first 2,000.
       evidence: anthropics/claude-code#94358, anthropics/claude-code#84021, anthropics/claude-code#70460, docs:output-cap
 
-Effectiveness (did the verdict change the call?) was not measured.
-Run with --live to check it against a real session.
+Channel check: <i>a deny verdict does take effect here</i> -- measured against two disposable sessions.
 
 A probe proves the moment of the test, not the future: time-dependent failures, state changes after the run and concurrency stay out of reach.</pre>
 <p>Zwei Dinge sind an dieser Ausgabe wichtig. Erstens steht in der Kopfzeile nicht „konfiguriert“, sondern <em>startet / antwortet / kann blockieren</em> — drei getrennte Eigenschaften. Zweitens steht unter jedem Fund die Ursache <strong>und</strong> die Reparatur, dazu die Belegnummer, unter der das Fehlerbild dokumentiert ist.</p>
