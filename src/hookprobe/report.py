@@ -19,6 +19,14 @@ UNKNOWN = "?"
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 
+def _stamp(mtime: float | None) -> str:
+    if mtime is None:
+        return "unknown"
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(mtime, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _flag(value: bool | None, *, na: bool = False) -> str:
     if value is True:
         return YES
@@ -340,6 +348,19 @@ def render_json(
                 "command": probe.hook.command,
                 "source": probe.hook.source.kind,
                 "sourcePath": str(probe.hook.source.path),
+                "identity": (
+                    {
+                        "resolvedPath": probe.identity.path,
+                        "exists": probe.identity.exists,
+                        "size": probe.identity.size,
+                        "mtime": probe.identity.mtime,
+                        "sha256": probe.identity.sha256,
+                        "symlinkTo": probe.identity.symlink_to,
+                        "note": probe.identity.note,
+                    }
+                    if getattr(probe, "identity", None) is not None
+                    else None
+                ),
                 "starts": probe.starts,
                 "answers": probe.answers,
                 "canBlock": probe.can_block,
@@ -372,7 +393,26 @@ def render_explain(name: str, probes: list[HookProbe]) -> str:
         hook = probe.hook
         out.append(f"{hook.event} · {_short(hook)}")
         out.append(f"  configured in : {hook.source.label}")
+        out.append(f"  settings file : {hook.source.path}")
         out.append(f"  command       : {hook.command}")
+        identity = getattr(probe, "identity", None)
+        if identity is not None:
+            if identity.path:
+                out.append(f"  resolves to   : {identity.path}")
+                if identity.symlink_to:
+                    out.append(f"  symlink to    : {identity.symlink_to}")
+                if identity.sha256:
+                    out.append(f"  sha256        : {identity.sha256}")
+                    out.append(
+                        f"  size / mtime  : {identity.size} bytes, "
+                        f"{_stamp(identity.mtime)}"
+                    )
+                elif identity.note:
+                    out.append(f"  fingerprint   : not taken -- {identity.note}")
+                elif not identity.exists:
+                    out.append("  fingerprint   : not taken -- the target does not exist")
+            elif identity.note:
+                out.append(f"  resolves to   : no single file -- {identity.note}")
         out.append(f"  matcher       : {hook.matcher if hook.matcher is not None else '(none)'}")
         out.append(f"  starts        : {_flag(probe.starts)}")
         out.append(f"  answers       : {_flag(probe.answers)}")

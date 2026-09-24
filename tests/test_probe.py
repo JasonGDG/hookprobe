@@ -913,6 +913,100 @@ class ForeignSetupTests(ProjectTestCase):
         self.assertIn("CONFIG.FRONTMATTER_UNPARSED", text)
 
 
+class IdentityTests(ProjectTestCase):
+    """anthropics/claude-code#83952: configuration says which command should run,
+    it cannot say whether the file at that path is the file you installed. The
+    fingerprint makes a swap under an unchanged config visible."""
+
+    def _identity(self, command: str):
+        from hookprobe.probe import identify
+
+        self.simple_settings("PreToolUse", command)
+        return identify(self.load().hooks[0], self.project)
+
+    def test_swapped_file_under_unchanged_config_changes_the_hash(self) -> None:
+        path = self.write_hook("guard.py", DENY_EXIT_2)
+        before = self._identity(str(path))
+        self.assertTrue(before.exists)
+        self.assertEqual(len(before.sha256), 64)
+
+        path.write_text(DENY_EXIT_1, "utf-8")  # same path, same settings, other file
+        after = self._identity(str(path))
+
+        self.assertEqual(before.path, after.path)
+        self.assertNotEqual(before.sha256, after.sha256)
+
+    def test_identical_content_gives_an_identical_hash(self) -> None:
+        first = self.write_hook("a.py", DENY_EXIT_2)
+        second = self.write_hook("b.py", DENY_EXIT_2)
+        self.assertEqual(self._identity(str(first)).sha256, self._identity(str(second)).sha256)
+
+    def test_interpreter_prefix_fingerprints_the_script_not_the_interpreter(self) -> None:
+        path = self.write_hook("guard.py", DENY_EXIT_2)
+        identity = self._identity(f"python3 {path}")
+        self.assertEqual(identity.path, str(path))
+        self.assertIsNotNone(identity.sha256)
+
+    def test_symlinked_target_is_named_and_hashed_by_content(self) -> None:
+        real = self.write_hook("real.py", DENY_EXIT_2)
+        link = self.project / ".claude" / "hooks" / "link.py"
+        link.symlink_to(real)
+        identity = self._identity(str(link))
+        self.assertEqual(identity.symlink_to, str(real))
+        self.assertEqual(identity.sha256, self._identity(str(real)).sha256)
+
+    def test_missing_target_is_reported_without_a_hash(self) -> None:
+        identity = self._identity(str(self.project / ".claude" / "gone.sh"))
+        self.assertFalse(identity.exists)
+        self.assertIsNone(identity.sha256)
+        self.assertIn("gone.sh", identity.path)
+
+    def test_no_single_target_says_why(self) -> None:
+        for command, expect in (
+            ('"${CLAUDE_PLUGIN_ROOT}/g.sh"', "placeholder"),
+            ("guard 2>/dev/null || exit 0", "shell construct"),
+            ("some-tool --strict", "PATH"),
+        ):
+            with self.subTest(command=command):
+                identity = self._identity(command)
+                self.assertIsNone(identity.path)
+                self.assertIn(expect, identity.note)
+
+    def test_static_only_json_carries_the_fingerprint(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from hookprobe.cli import main
+
+        path = self.write_hook("guard.py", DENY_EXIT_2)
+        self.simple_settings("PreToolUse", str(path))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            main([str(self.project), "--no-home", "--static-only", "--json"])
+
+        identity = json.loads(buffer.getvalue())["hooks"][0]["identity"]
+        self.assertEqual(identity["resolvedPath"], str(path))
+        self.assertEqual(len(identity["sha256"]), 64)
+        self.assertTrue(identity["exists"])
+
+    def test_explain_shows_settings_file_and_hash(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        from hookprobe.cli import main
+
+        path = self.write_hook("guard.py", DENY_EXIT_2)
+        self.simple_settings("PreToolUse", str(path))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            main([str(self.project), "--no-home", "--explain", "guard"])
+        text = buffer.getvalue()
+
+        self.assertIn("settings file", text)
+        self.assertIn("resolves to", text)
+        self.assertIn("sha256", text)
+
+
 class SafetyTests(ProjectTestCase):
     """Two things a tool that runs other people's programs has to have before
     anyone else runs it: a ceiling on what a handler can do to the machine, and

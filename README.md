@@ -162,6 +162,39 @@ file hookprobe may write (never managed settings) — and otherwise prints the m
 
 `--ask` needs a terminal. Without one it stops with exit 2 rather than guessing.
 
+## Which file will actually run
+
+Configuration says which command should run. It cannot say whether the file at that path is the
+file you installed — a stale installed copy, a swapped script, or a symlink pointing somewhere
+else all leave the configuration looking identical
+([#83952](https://github.com/anthropics/claude-code/issues/83952)).
+
+So every entry carries an identity fingerprint: the settings file it came from, the target the
+command resolves to, and that target's SHA-256, size and mtime. Comparing two runs makes a swap
+under an unchanged config visible.
+
+```sh
+hookprobe --static-only --explain guard
+```
+
+```
+PreToolUse · pre_tool_use.py
+  configured in : project (.claude/settings.json)
+  settings file : /home/you/proj/.claude/settings.json
+  command       : uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tool_use.py
+  resolves to   : /home/you/proj/.claude/hooks/pre_tool_use.py
+  sha256        : 78006866f793ccd394bc52011582ce48707ceef9d3496e474ab7bcb63365a5da
+  size / mtime  : 5145 bytes, 2026-09-23 13:54:58
+```
+
+`--json` carries the same under `identity` per hook, and `--static-only` computes it without
+running anything, so it fits in CI and in an install script.
+
+The resolution is deliberately the one the probe executes with, not a better one: a fingerprint
+found by a route the hook itself does not take would describe a file that never runs. Where there
+is no single target — an unresolved placeholder, a shell construct, a bare name looked up on PATH
+— it says which of those it is instead of guessing.
+
 ## How `--live` works
 
 Effectiveness cannot be read from a single run — you cannot tell "the hook blocked it" from

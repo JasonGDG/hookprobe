@@ -191,9 +191,15 @@ def _schema_findings(config) -> list:
 def _static_probe(hook, project_dir: Path):
     """Everything that can be read from disk, and nothing that runs."""
     from .checks import Finding
-    from .probe import HookProbe, check_startable
+    from .probe import HookProbe, check_startable, identify
 
     probe = HookProbe(hook=hook)
+    # The fingerprint is disk-only, so it belongs in the mode that runs nothing --
+    # this is the surface meant for CI and install scripts.
+    try:
+        probe.identity = identify(hook, project_dir)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         probe.findings.extend(check_startable(hook, project_dir))
     except Exception:  # noqa: BLE001

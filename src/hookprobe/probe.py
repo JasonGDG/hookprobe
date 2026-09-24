@@ -14,6 +14,7 @@ directory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -67,6 +68,78 @@ REJECTABLE_EVENTS = frozenset(
 ) & BLOCKING_EVENTS
 
 
+MAX_FINGERPRINT_BYTES = 64 * 1024 * 1024
+
+
+@dataclass
+class Identity:
+    """What the configured entry actually points at, on disk, right now.
+
+    Configuration says which command should run; it cannot say whether the file
+    at that path is still the file you installed. Reported per entry so a
+    swapped or stale artefact under an unchanged config becomes visible by
+    comparing two runs (anthropics/claude-code#83952).
+    """
+
+    path: str | None = None
+    exists: bool = False
+    size: int | None = None
+    mtime: float | None = None
+    sha256: str | None = None
+    symlink_to: str | None = None
+    note: str = ""
+
+
+def identify(hook: HookEntry, cwd: Path) -> Identity:
+    """Resolve the entry's target and fingerprint it.
+
+    Deliberately uses the same resolution the probe executes with, not a better
+    one: a fingerprint found by a route the hook itself does not take would
+    describe a file that never runs.
+    """
+    if hook.type != "command":
+        return Identity(note=f"handler type {hook.type!r} has no command target")
+    target = _script_path(hook, cwd)
+    if target is None:
+        command = _expanded_command(hook, cwd) or str(hook.command or "")
+        if "${" in command or "$(" in command:
+            reason = "command still contains an unresolved placeholder"
+        elif any(symbol in command for symbol in ("|", ";", "&&", "||", ">", "<")):
+            reason = "shell construct: no single target to fingerprint"
+        else:
+            reason = "target is a bare name resolved on PATH, not a path"
+        return Identity(note=reason)
+
+    resolved = target if target.is_absolute() else (cwd / target)
+    identity = Identity(path=str(resolved))
+    try:
+        link = os.readlink(resolved) if os.path.islink(resolved) else None
+    except OSError:
+        link = None
+    identity.symlink_to = link
+    try:
+        info = resolved.stat()  # follows symlinks, as execution does
+    except OSError as error:
+        identity.note = f"cannot stat the target: {type(error).__name__}"
+        return identity
+    identity.exists = True
+    identity.size = info.st_size
+    identity.mtime = info.st_mtime
+    if info.st_size > MAX_FINGERPRINT_BYTES:
+        identity.note = f"{info.st_size} bytes is above the {MAX_FINGERPRINT_BYTES} byte hashing limit"
+        return identity
+    digest = hashlib.sha256()
+    try:
+        with open(resolved, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError as error:
+        identity.note = f"cannot read the target: {type(error).__name__}"
+        return identity
+    identity.sha256 = digest.hexdigest()
+    return identity
+
+
 @dataclass
 class HookProbe:
     """Everything observed about one handler.
@@ -83,6 +156,7 @@ class HookProbe:
     findings: list[Finding] = field(default_factory=list)
     neutral: RunResult | None = None
     deny: RunResult | None = None
+    identity: Identity | None = None
 
     @property
     def name(self) -> str:
@@ -767,6 +841,7 @@ def _reads_stdin(hook: HookEntry) -> bool:
 def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> HookProbe:
     """Run one handler and derive starts / answers / can block."""
     result = HookProbe(hook=hook)
+    result.identity = identify(hook, cwd)
     result.findings.extend(check_startable(hook, cwd))
 
     if hook.type != "command":

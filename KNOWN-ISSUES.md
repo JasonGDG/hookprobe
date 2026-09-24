@@ -129,3 +129,8 @@ install now says so.
   stderr that it is about to execute handlers. [K7 in part]
 - The package no longer claims `OS Independent`; it is POSIX (macOS, Linux). [W14]
 - The three suites run in GitHub Actions on Ubuntu and macOS, Python 3.11 and 3.13.
+- Every entry now carries an identity fingerprint (settings file, resolved target, SHA-256, size,
+  mtime, symlink target), in `--explain` and in `--json`, and computed under `--static-only`.
+  Asked for in anthropics/claude-code#83952; what remains out of reach is the other half of that
+  request — only the runtime can say which file it is about to execute, and this still infers
+  from disk. [24.09.]
