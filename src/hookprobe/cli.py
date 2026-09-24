@@ -329,8 +329,8 @@ def main(argv: list[str] | None = None) -> int:
         # Said once, plainly: this runs other people's programs with your
         # environment. The flag that does not is named in the same breath.
         print(
-            f"Executing {runnable} handler(s) with your environment, several times each; "
-            "--static-only reads the configuration without running anything.",
+            f"Executing {runnable} handler(s) with your environment, several times each. "
+            "--static-only runs nothing.",
             file=sys.stderr,
         )
     probes = _probe_all(config, project_dir, args.timeout, args.static_only)

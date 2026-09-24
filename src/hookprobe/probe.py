@@ -808,7 +808,10 @@ def probe_hook(hook: HookEntry, cwd: Path, timeout: float | None = None) -> Hook
 
     failure = launch_failed(neutral, _expanded_command(hook, cwd) or str(hook.command or ""))
     if failure is not None:
-        # The process spawned, but the hook never ran: the gate is open.
+        # The process spawned, but the hook never ran: the gate is open. The
+        # static check may already have named the cause; this is the runtime
+        # confirmation, kept as its own finding and folded into the static one
+        # by the report.
         result.starts = False
         result.answers = False
         result.can_block = False if hook.event in BLOCKING_EVENTS else None

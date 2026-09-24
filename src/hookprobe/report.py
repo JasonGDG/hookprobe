@@ -195,14 +195,29 @@ def render_text(
         )
         out.append("")
         for probe in broken:
-            for finding in _sorted_findings(probe.findings):
-                if finding.severity == "info":
+            findings = [f for f in _sorted_findings(probe.findings) if f.severity != "info"]
+            # A static diagnosis ("no execute bit") and the runtime confirmation
+            # ("Permission denied") are one fact seen twice. Both stay on the
+            # record; the report shows the second as a line under the first.
+            static_launch = [
+                f
+                for f in findings
+                if f.code.startswith("P01.")
+                and f.code not in ("P01.SPAWN_FAILED", "P01.NOT_TESTED")
+                and f.severity == "critical"
+            ]
+            runtime = next((f for f in findings if f.code == "P01.SPAWN_FAILED"), None)
+            folded = runtime if (runtime is not None and static_launch) else None
+            for finding in findings:
+                if finding is folded:
                     continue
                 entry = evidence.lookup(finding.code)
                 out.append(f"  {_short(probe.hook)}")
                 out.append(f"      {finding.message}")
                 if finding.detail:
                     out.append(f"      {finding.detail}")
+                if folded is not None and finding is static_launch[0] and folded.detail:
+                    out.append(f"      confirmed at runtime: {folded.detail}")
                 if entry.repair:
                     out.append(f"      fix: {entry.repair}")
                 if entry.references:

@@ -18,6 +18,14 @@
 
 **Your protective hooks all show green. Two of them stopped checking weeks ago.**
 
+![The sabotage test: a healthy setup is reported healthy; then the execute bit is removed from the guard and the report names exactly that one hook, with the fix and the evidence.](demo/sabotage.gif)
+
+*The sabotage test.* A healthy setup, reported healthy. Then exactly one thing is broken — the
+execute bit on the guard — and the report names exactly that one, with the runtime confirmation,
+the fix and the issue that documents the failure. Not more, not less: that is the whole tool.
+Re-record it with [`vhs demo/sabotage.tape`](demo/sabotage.tape); the project it runs against is
+in [`demo/project`](demo/project).
+
 Claude Code hooks are the place where permissions are actually enforced — a language model
 is not a permission system. But a hook is a separate program on disk, and every step between
 "listed in `settings.json`" and "running" can fail without a word. When it does, Claude Code

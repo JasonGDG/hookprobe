@@ -1,0 +1,3 @@
+#!/bin/sh
+# Shim for the recording: runs the checkout without installing anything.
+exec python3 -m hookprobe "$@"
